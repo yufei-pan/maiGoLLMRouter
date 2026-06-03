@@ -93,11 +93,19 @@ targets = ["google/gemini-embedding-2"]
 #  - "provider/model" with a known provider routes directly (remainder is the model,
 #    e.g. openrouter/google/gemma-4 -> openrouter, model "google/gemma-4").
 #  - "provider/model" with an unknown provider, or a bare unmapped name, routes to
-#    fallback_provider using the FULL name (e.g. nvidia/nemotron-3 -> fallback,
-#    model "nvidia/nemotron-3"; free -> fallback, model "free").
-#  - If fallback_provider is not a defined provider, it is treated as no fallback
-#    and such names return an error.
+#    the fallback_providers using the FULL name (e.g. nvidia/nemotron-3 -> fallback,
+#    model "nvidia/nemotron-3"; free -> fallback, model "free"). The full name is
+#    tried against each fallback provider in turn.
+#  - Any fallback provider that is not a defined provider is dropped with a warning;
+#    if none remain, such names return an error.
+#
+# fallback_providers : ordered list of catch-all providers for unmapped names.
+# fallback_selection : "sequential" (default) tries them in listed order;
+#                      "shuffle" / "random" shuffles the fallback providers per request.
+# fallback_provider  : DEPRECATED singular form; still accepted and merged into
+#                      fallback_providers for backward compatibility.
 # ---------------------------------------------------------------------------
 
 [routing]
-fallback_provider = "openrouter"
+fallback_providers = ["openrouter"]
+fallback_selection = "sequential"

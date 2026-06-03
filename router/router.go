@@ -82,18 +82,34 @@ func (r *Router) Resolve(model string) ([]config.Target, error) {
 		if _, ok := r.cfg.Providers[prov]; ok {
 			return []config.Target{{Provider: prov, Model: rest}}, nil
 		}
-		// Unknown provider prefix: hand the FULL name to the fallback provider
+		// Unknown provider prefix: hand the FULL name to the fallback providers
 		// (e.g. "nvidia/nemotron-3" -> openrouter model "nvidia/nemotron-3").
-		if r.cfg.FallbackProvider != "" {
-			return []config.Target{{Provider: r.cfg.FallbackProvider, Model: model}}, nil
+		if fb := r.fallbackTargets(model); len(fb) > 0 {
+			return fb, nil
 		}
-		return nil, fmt.Errorf("unknown provider %q and no fallback_provider configured", prov)
+		return nil, fmt.Errorf("unknown provider %q and no fallback_providers configured", prov)
 	}
-	// Bare, unmapped name routes to the fallback provider.
-	if r.cfg.FallbackProvider != "" {
-		return []config.Target{{Provider: r.cfg.FallbackProvider, Model: model}}, nil
+	// Bare, unmapped name routes to the fallback providers.
+	if fb := r.fallbackTargets(model); len(fb) > 0 {
+		return fb, nil
 	}
-	return nil, fmt.Errorf("unrecognized model %q and no fallback_provider configured", model)
+	return nil, fmt.Errorf("unrecognized model %q and no fallback_providers configured", model)
+}
+
+// fallbackTargets builds the ordered list of fallback targets for an inbound
+// model name, one target per configured fallback provider. The order follows
+// the configured fallback selection method: sequential (config order) by
+// default, or shuffled per request when set to shuffle/random.
+func (r *Router) fallbackTargets(model string) []config.Target {
+	provs := orderedProviders(r.cfg.FallbackProviders, r.cfg.FallbackSelection)
+	if len(provs) == 0 {
+		return nil
+	}
+	out := make([]config.Target, 0, len(provs))
+	for _, prov := range provs {
+		out = append(out, config.Target{Provider: prov, Model: model})
+	}
+	return out
 }
 
 // Execute runs the full routing algorithm for one request and returns the
@@ -280,6 +296,17 @@ func shuffledKeys(keys []string) []string {
 func orderedTargets(targets []config.Target, selection string) []config.Target {
 	out := make([]config.Target, len(targets))
 	copy(out, targets)
+	if selection == config.TargetSelectionShuffle && len(out) > 1 {
+		rand.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
+	}
+	return out
+}
+
+// orderedProviders returns a copy of names, optionally shuffled per request
+// when selection is shuffle/random.
+func orderedProviders(names []string, selection string) []string {
+	out := make([]string, len(names))
+	copy(out, names)
 	if selection == config.TargetSelectionShuffle && len(out) > 1 {
 		rand.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
 	}

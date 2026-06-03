@@ -248,8 +248,8 @@ keys = ["k"]
 [routing]
 fallback_provider = "openrouter"
 `)
-	if cfg.FallbackProvider != "" {
-		t.Fatalf("undefined fallback provider should be cleared, got %q", cfg.FallbackProvider)
+	if len(cfg.FallbackProviders) != 0 {
+		t.Fatalf("undefined fallback provider should be cleared, got %v", cfg.FallbackProviders)
 	}
 	r := New(cfg)
 
@@ -262,72 +262,194 @@ fallback_provider = "openrouter"
 	wantErr(t, r, "nvidia/nemotron-3")
 }
 
-func TestFallbackModelsUseNormalKeysWhenNoFallbackKeys(t *testing.T) {
-	// Normal keys (n*) fail in phase 1; with fallback_models set but no
-	// fallback_keys, the normal keys are reused in the fallback round and now
-	// succeed (the mock allows the second time via a different key).
-	var seen = map[string]int{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		tok := bearer(r)
-		seen[tok]++
-		// Fail on the phase-1 attempt, succeed on the phase-2 reuse.
-		if seen[tok] == 1 {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		fmt.Fprint(w, chatStop)
-	}))
-	defer srv.Close()
-
-	cfg := loadCfg(t, fmt.Sprintf(`
+func TestResolveFallbackProvidersSequential(t *testing.T) {
+	// fallback_providers is a list tried in order by default; an unmapped name
+	// expands to one target per defined fallback provider, in config order.
+	cfg := loadCfg(t, `
 [[provider]]
-name = "openai"
+name = "a"
 kind = "openai"
-base_url = %q
-keys = ["n1"]
-fallback_models = ["real-model"]
+base_url = "https://a/v1"
+keys = ["k"]
 
-[model."m"]
-targets = ["openai/real-model"]
-`, srv.URL))
+[[provider]]
+name = "b"
+kind = "openai"
+base_url = "https://b/v1"
+keys = ["k"]
 
-	res := New(cfg).Execute(context.Background(), provider.OpChat, "m", chatReq())
-	if !res.Success {
-		t.Fatalf("expected success via normal-key fallback round, attempts=%+v", res.Attempts)
+[routing]
+fallback_providers = ["a", "b"]
+`)
+	if got := cfg.FallbackSelection; got != config.TargetSelectionSequential {
+		t.Fatalf("selection = %q, want sequential", got)
 	}
-	last := res.Attempts[len(res.Attempts)-1]
-	if last.KeyType != "fallback" {
-		t.Errorf("expected success on fallback round, last=%+v", last)
+	r := New(cfg)
+	for i := 0; i < 10; i++ {
+		targets, err := r.Resolve("free")
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		want := []config.Target{{Provider: "a", Model: "free"}, {Provider: "b", Model: "free"}}
+		if len(targets) != len(want) {
+			t.Fatalf("targets = %d, want %d", len(targets), len(want))
+		}
+		for j := range want {
+			if targets[j] != want[j] {
+				t.Fatalf("iter %d target[%d] = %+v, want %+v", i, j, targets[j], want[j])
+			}
+		}
+	}
+	// Unknown provider prefix routes the FULL name to each fallback provider.
+	got, err := r.Resolve("nvidia/nemotron-3")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(got) != 2 || got[0] != (config.Target{Provider: "a", Model: "nvidia/nemotron-3"}) {
+		t.Errorf("unexpected fallback targets: %+v", got)
 	}
 }
 
-func TestFallbackModelsGatingWithReusedNormalKeys(t *testing.T) {
-	// fallback_models excludes the routed model, so even though fallback would
-	// reuse normal keys, the model is gated out and the request fails.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func TestResolveFallbackProvidersShuffle(t *testing.T) {
+	cfg := loadCfg(t, `
+[[provider]]
+name = "a"
+kind = "openai"
+base_url = "https://a/v1"
+keys = ["k"]
+
+[[provider]]
+name = "b"
+kind = "openai"
+base_url = "https://b/v1"
+keys = ["k"]
+
+[[provider]]
+name = "c"
+kind = "openai"
+base_url = "https://c/v1"
+keys = ["k"]
+
+[routing]
+fallback_providers = ["a", "b", "c"]
+fallback_selection = "random"
+`)
+	if got := cfg.FallbackSelection; got != config.TargetSelectionShuffle {
+		t.Fatalf("selection = %q, want shuffle", got)
+	}
+	r := New(cfg)
+	first := ""
+	same := 0
+	for i := 0; i < 30; i++ {
+		targets, err := r.Resolve("free")
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if len(targets) != 3 {
+			t.Fatalf("targets = %d, want 3", len(targets))
+		}
+		head := targets[0].Provider
+		if first == "" {
+			first = head
+			continue
+		}
+		if head == first {
+			same++
+		}
+	}
+	if same == 29 {
+		t.Errorf("shuffle fallback selection never changed first provider across 30 resolves")
+	}
+}
+
+func TestFallbackProvidersBackwardCompatSingular(t *testing.T) {
+	// The deprecated singular fallback_provider still works and is merged into
+	// the providers list.
+	cfg := loadCfg(t, `
+[[provider]]
+name = "openrouter"
+kind = "openai"
+base_url = "https://o/api/v1"
+keys = ["k"]
+
+[routing]
+fallback_provider = "openrouter"
+`)
+	if len(cfg.FallbackProviders) != 1 || cfg.FallbackProviders[0] != "openrouter" {
+		t.Fatalf("FallbackProviders = %v, want [openrouter]", cfg.FallbackProviders)
+	}
+	got := mustResolve(t, New(cfg), "free")
+	if got.Provider != "openrouter" || got.Model != "free" {
+		t.Errorf("Resolve(free) = %s/%s, want openrouter/free", got.Provider, got.Model)
+	}
+}
+
+func TestFallbackProvidersMergeDedup(t *testing.T) {
+	// Plural list comes first; the singular is appended; duplicates and
+	// undefined providers are dropped.
+	cfg := loadCfg(t, `
+[[provider]]
+name = "a"
+kind = "openai"
+base_url = "https://a/v1"
+keys = ["k"]
+
+[[provider]]
+name = "b"
+kind = "openai"
+base_url = "https://b/v1"
+keys = ["k"]
+
+[routing]
+fallback_providers = ["a", "b", "undefined", "a"]
+fallback_provider = "b"
+`)
+	want := []string{"a", "b"}
+	if len(cfg.FallbackProviders) != len(want) {
+		t.Fatalf("FallbackProviders = %v, want %v", cfg.FallbackProviders, want)
+	}
+	for i := range want {
+		if cfg.FallbackProviders[i] != want[i] {
+			t.Fatalf("FallbackProviders = %v, want %v", cfg.FallbackProviders, want)
+		}
+	}
+}
+
+func TestExecuteFallbackProvidersSequenceUntilSuccess(t *testing.T) {
+	// Provider "a" always fails; provider "b" succeeds. A bare unmapped name
+	// should fall through "a" to "b" and succeed.
+	aSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
-	defer srv.Close()
+	defer aSrv.Close()
+	bSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, chatStop)
+	}))
+	defer bSrv.Close()
 
 	cfg := loadCfg(t, fmt.Sprintf(`
 [[provider]]
-name = "openai"
+name = "a"
 kind = "openai"
 base_url = %q
-keys = ["n1"]
-fallback_models = ["other-model"]
+keys = ["ka"]
 
-[model."m"]
-targets = ["openai/real-model"]
-`, srv.URL))
+[[provider]]
+name = "b"
+kind = "openai"
+base_url = %q
+keys = ["kb"]
 
-	res := New(cfg).Execute(context.Background(), provider.OpChat, "m", chatReq())
-	if res.Success {
-		t.Fatal("expected failure: model gated out of fallback")
+[routing]
+fallback_providers = ["a", "b"]
+`, aSrv.URL, bSrv.URL))
+
+	res := New(cfg).Execute(context.Background(), provider.OpChat, "some-unmapped-model", chatReq())
+	if !res.Success {
+		t.Fatalf("expected success via second fallback provider, attempts=%+v", res.Attempts)
 	}
-	// Only the single phase-1 attempt should exist (no fallback round for this model).
-	if len(res.Attempts) != 1 {
-		t.Errorf("attempts = %d, want 1 (no fallback round)", len(res.Attempts))
+	if res.Provider != "b" {
+		t.Errorf("served by %q, want b", res.Provider)
 	}
 }
 
