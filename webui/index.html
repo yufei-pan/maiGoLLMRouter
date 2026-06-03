@@ -110,15 +110,46 @@ function attemptRow(a, entryKey, idx) {
   return head + err + resp;
 }
 
-function detail(e, entryKey) {
+// detailInner builds the contents of an expanded row's detail cell from a full
+// entry record (fetched lazily on expansion).
+function detailInner(e, entryKey) {
   const attempts = (e.attempts || []).map((a, i) => attemptRow(a, entryKey, i)).join('') || '<span class="muted">none</span>';
-  return `<td colspan="7">
-    <div class="grid">
+  return `<div class="grid">
       <div class="card"><h3>Request</h3><pre class="nowrap" data-scrollkey="${esc(entryKey + '::req')}">${esc(pretty(e.request))}</pre></div>
       <div class="card"><h3>Response</h3><pre class="nowrap" data-scrollkey="${esc(entryKey + '::resp')}">${esc(pretty(e.response))}</pre></div>
     </div>
-    <div class="attempts"><div class="card"><h3>Attempts (${(e.attempts||[]).length})</h3>${attempts}</div></div>
-  </td>`;
+    <div class="attempts"><div class="card"><h3>Attempts (${(e.attempts||[]).length})</h3>${attempts}</div></div>`;
+}
+
+// detailCache holds full entry records keyed by id so an expanded row does not
+// re-fetch on every list refresh. Entries are append-only/immutable, so caching
+// by id is safe.
+const detailCache = new Map();
+
+// fillDetail populates an expanded row's cell, fetching the full record once and
+// caching it. captured UI state (open nested <details>, scroll) is reapplied
+// after async fills so it survives a refresh.
+async function fillDetail(key, td, uiState) {
+  if (detailCache.has(key)) {
+    td.innerHTML = detailInner(detailCache.get(key), key);
+    if (uiState) applyUIState(uiState);
+    return;
+  }
+  if (td.dataset.loading) return;
+  td.dataset.loading = '1';
+  td.innerHTML = '<div class="muted" style="padding:10px">Loading…</div>';
+  try {
+    const res = await fetch('/ui/logs/entry?id=' + encodeURIComponent(key));
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const full = await res.json();
+    detailCache.set(key, full);
+    td.innerHTML = detailInner(full, key);
+    if (uiState) applyUIState(uiState);
+  } catch (err) {
+    td.innerHTML = '<div class="o-error" style="padding:10px">Failed to load detail: ' + esc(err) + '</div>';
+  } finally {
+    delete td.dataset.loading;
+  }
 }
 
 // captureUIState records, by stable key, which nested <details> are open and
@@ -161,16 +192,21 @@ function render(entries) {
       <td>${esc(e.endpoint)}</td>
       <td class="mono">${esc(e.inbound_model)}</td>
       <td class="mono">${served}</td>
-      <td>${(e.attempts||[]).length}</td>
+      <td>${esc(e.attempts_count)}</td>
       <td class="muted">${esc(e.latency_ms)} ms</td>`;
     const dt = document.createElement('tr');
     dt.className = 'detail';
-    dt.style.display = expanded.has(key) ? 'table-row' : 'none';
-    dt.innerHTML = detail(e, key);
+    const td = document.createElement('td');
+    td.colSpan = 7;
+    dt.appendChild(td);
+    const isOpen = expanded.has(key);
+    dt.style.display = isOpen ? 'table-row' : 'none';
+    if (isOpen) fillDetail(key, td, ui);
     tr.addEventListener('click', () => {
       if (dt.style.display === 'none') {
         dt.style.display = 'table-row';
         expanded.add(key);
+        fillDetail(key, td);
       } else {
         dt.style.display = 'none';
         expanded.delete(key);
