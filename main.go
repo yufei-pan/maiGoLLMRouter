@@ -132,6 +132,9 @@ func logStartup(cfg *config.Config, configPath string) {
 		log.Printf("    - %s", pt)
 	}
 	log.Printf("models: %d", len(cfg.Models))
+	if len(cfg.FallbackProviders) > 0 {
+		log.Printf("fallback providers (%s): %s", cfg.FallbackSelection, strings.Join(cfg.FallbackProviders, ", "))
+	}
 	log.Printf("web UI: %s/ui", base)
 }
 

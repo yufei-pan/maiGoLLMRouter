@@ -20,6 +20,7 @@ Minimal dependencies: the Go standard library plus one TOML parser
 - **Output verification + retry**: chat responses must have content and a "good" finish reason; otherwise the request is retried (bounded, no blackout).
 - **Chat and embeddings** support.
 - **Model mapping**: inbound model name → ordered list of `provider/model` targets.
+- **Fallback providers**: a list of catch-all providers for unmapped names, tried in sequence (or shuffled).
 - **Pass-through** of unknown request arguments to the downstream provider.
 - **JSONL request/response logging** with masked keys, viewable in an embedded web UI.
 
@@ -140,7 +141,8 @@ selection = "shuffle"
 targets = ["google/gemma-4-31b-it", "openrouter/openrouter/free"]
 
 [routing]
-fallback_provider = "google"
+fallback_providers = ["google", "openrouter"]
+fallback_selection = "sequential"   # default; "shuffle"/"random" to randomize order
 ```
 
 Optional `selection` controls how the expanded target list is ordered for each
@@ -170,11 +172,27 @@ Resolution order for an inbound model name:
 
 1. If it matches a `[model.*]` entry, use its ordered `targets`.
 2. Otherwise, if it is `provider/model` with a **known** provider, route there directly with the remainder as the model (e.g. `openrouter/google/gemma-4` -> provider `openrouter`, model `google/gemma-4`).
-3. Otherwise (unknown provider prefix, or a bare unmapped name), route to `fallback_provider` using the **full original name** (e.g. `nvidia/nemotron-3` -> provider `fallback`, model `nvidia/nemotron-3`; `free` -> provider `fallback`, model `free`).
+3. Otherwise (unknown provider prefix, or a bare unmapped name), route to the `fallback_providers` using the **full original name** (e.g. `nvidia/nemotron-3` -> provider `fallback`, model `nvidia/nemotron-3`; `free` -> provider `fallback`, model `free`).
 
-If `fallback_provider` is set but does not name a defined provider, it is treated as if no fallback were configured, and unresolved names return an error.
+### Fallback providers
 
-Examples (providers `google` + `openrouter` defined, `fallback_provider = "openrouter"`):
+`fallback_providers` is a list of provider names used as the catch-all for
+inbound names that don't match a `[model.*]` entry or a known `provider/` prefix.
+The full original name is tried against each fallback provider as an additional
+target, so a later provider can serve a name that an earlier one rejects (each
+target still goes through the normal-keys then fallback-keys phases).
+
+| Key                  | Meaning                                                                                          |
+| -------------------- | ------------------------------------------------------------------------------------------------ |
+| `fallback_providers` | Ordered list of provider names tried for unmapped inbound names.                                 |
+| `fallback_selection` | `sequential` (default) tries them in listed order; `shuffle` (alias `random`) shuffles per request. |
+| `fallback_provider`  | **Deprecated** singular form; still accepted and merged into `fallback_providers`.               |
+
+Entries that do not name a defined provider are dropped with a warning; if none
+remain, unresolved names return an error. The deprecated singular
+`fallback_provider` is still accepted and appended to the list.
+
+Examples (providers `google` + `openrouter` defined, `fallback_providers = ["openrouter"]`):
 
 
 | Inbound                     | Resolves to                        |
@@ -191,6 +209,8 @@ If only `google` is defined (so `openrouter` fallback is undefined), `google/gem
 
 ```
 resolve inbound model -> ordered [provider/model] targets
+  (unmapped names expand to one target per fallback provider,
+   in sequential or shuffled order)
 
 # Phase 1 — normal keys
 for each target in order:
@@ -247,4 +267,3 @@ Practical implications:
 - For translated dialects, pass-through of unknown arguments is best-effort. For Gemini, known top-level request fields (`toolConfig`, `safetySettings`, `systemInstruction`, `cachedContent`, `labels`, in camelCase or snake_case) are placed at the request root and an explicit `generationConfig` is merged in; all other extras go into `generationConfig`. For Anthropic, extras are merged top-level. OpenAI is verbatim pass-through.
 - **Gemini tool calling** is translated from the OpenAI shape: `tools` (`{type:"function", function:{...}}`) and the legacy `functions` array become Gemini `functionDeclarations` (the parameter JSON Schema is sanitized to the fields Gemini accepts, dropping e.g. `additionalProperties`/`$schema`), `tool_choice` becomes `toolConfig.functionCallingConfig`, assistant `tool_calls` and `tool` result messages become `functionCall`/`functionResponse` parts, and Gemini `functionCall` responses are converted back into OpenAI `tool_calls` (with `finish_reason: "tool_calls"`). Tools already in Gemini-native form (`{functionDeclarations:[...]}`) are passed through unchanged.
 - `max_tokens` is required by Anthropic; if omitted it defaults to 8192.
-

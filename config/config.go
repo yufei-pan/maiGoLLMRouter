@@ -33,10 +33,17 @@ var DefaultGoodFinishReasons = []string{"stop", "length", "tool_calls", "functio
 
 // Config is the fully resolved, validated runtime configuration.
 type Config struct {
-	Server           Server
-	Providers        map[string]*Provider // keyed by provider name
-	Models           map[string]ModelRoute
-	FallbackProvider string
+	Server    Server
+	Providers map[string]*Provider // keyed by provider name
+	Models    map[string]ModelRoute
+
+	// FallbackProviders is the ordered list of providers used for inbound
+	// model names that do not resolve to a configured model or known provider
+	// prefix. They are tried according to FallbackSelection.
+	FallbackProviders []string
+	// FallbackSelection controls the order fallback providers are tried in:
+	// TargetSelectionSequential (default) or TargetSelectionShuffle.
+	FallbackSelection string
 }
 
 // Server holds top-level server settings.
@@ -135,7 +142,11 @@ type rawModel struct {
 }
 
 type rawRouting struct {
-	FallbackProvider string `toml:"fallback_provider"`
+	// FallbackProvider is the deprecated singular form; still accepted and
+	// merged into FallbackProviders for backward compatibility.
+	FallbackProvider  string   `toml:"fallback_provider"`
+	FallbackProviders []string `toml:"fallback_providers"`
+	FallbackSelection string   `toml:"fallback_selection"` // sequential (default) | shuffle | random
 }
 
 // Load reads and validates the configuration at path.
@@ -149,9 +160,8 @@ func Load(path string) (*Config, error) {
 
 func build(raw rawConfig) (*Config, error) {
 	cfg := &Config{
-		Providers:        make(map[string]*Provider),
-		Models:           make(map[string]ModelRoute),
-		FallbackProvider: strings.TrimSpace(raw.Routing.FallbackProvider),
+		Providers: make(map[string]*Provider),
+		Models:    make(map[string]ModelRoute),
 	}
 
 	// Server section with defaults.
@@ -272,12 +282,37 @@ func build(raw rawConfig) (*Config, error) {
 		cfg.Models[name] = ModelRoute{Targets: targets, Selection: modelSelection[name]}
 	}
 
-	if cfg.FallbackProvider != "" {
-		if _, ok := cfg.Providers[cfg.FallbackProvider]; !ok {
-			log.Printf("WARNING: routing.fallback_provider %q is not a defined provider; treating as no fallback", cfg.FallbackProvider)
-			cfg.FallbackProvider = ""
+	// Resolve the fallback providers list. The deprecated singular
+	// fallback_provider is merged in after the plural fallback_providers,
+	// preserving order and dropping duplicates and empties.
+	seen := make(map[string]bool)
+	var fallbacks []string
+	addFallback := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" || seen[name] {
+			return
+		}
+		seen[name] = true
+		fallbacks = append(fallbacks, name)
+	}
+	for _, name := range raw.Routing.FallbackProviders {
+		addFallback(name)
+	}
+	addFallback(raw.Routing.FallbackProvider)
+
+	for _, name := range fallbacks {
+		if _, ok := cfg.Providers[name]; ok {
+			cfg.FallbackProviders = append(cfg.FallbackProviders, name)
+		} else {
+			log.Printf("WARNING: routing fallback provider %q is not a defined provider; ignoring", name)
 		}
 	}
+
+	sel, err := normalizeSelection(raw.Routing.FallbackSelection, "routing.fallback_selection")
+	if err != nil {
+		return nil, err
+	}
+	cfg.FallbackSelection = sel
 
 	return cfg, nil
 }
@@ -345,17 +380,23 @@ func firstNonEmpty(vals ...string) string {
 }
 
 func normalizeTargetSelection(s, modelName string) (string, error) {
+	return normalizeSelection(s, fmt.Sprintf("model %q", modelName))
+}
+
+// normalizeSelection maps a selection string to a canonical selection method.
+// An empty value defaults to sequential. "random" is an alias for "shuffle".
+// ctx is used to prefix error messages (e.g. `model "free"`).
+func normalizeSelection(s, ctx string) (string, error) {
 	s = strings.ToLower(strings.TrimSpace(s))
-	if s == "" {
-		return TargetSelectionSequential, nil
-	}
 	switch s {
+	case "":
+		return TargetSelectionSequential, nil
 	case TargetSelectionSequential:
 		return TargetSelectionSequential, nil
 	case TargetSelectionShuffle, "random":
 		return TargetSelectionShuffle, nil
 	default:
-		return "", fmt.Errorf("model %q: unknown selection %q (want %q, %q, or random)",
-			modelName, s, TargetSelectionSequential, TargetSelectionShuffle)
+		return "", fmt.Errorf("%s: unknown selection %q (want %q, %q, or random)",
+			ctx, s, TargetSelectionSequential, TargetSelectionShuffle)
 	}
 }
