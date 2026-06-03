@@ -35,11 +35,12 @@
   .muted { color: var(--muted); }
   .detail td { background: var(--panel); }
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-  .card { background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+  .card { background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; min-width: 0; }
   .card h3 { margin: 0 0 8px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
   pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: var(--mono);
     font-size: 12px; max-height: 360px; overflow: auto; }
-  .attempts { margin-top: 12px; }
+  pre.nowrap { white-space: pre; word-break: normal; }
+  .attempts { margin-top: 12px; display: grid; grid-template-columns: minmax(0, 1fr); }
   .attempt { display: grid; grid-template-columns: 1fr 1fr 90px 110px 90px 90px;
     gap: 8px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 6px; font-size: 12px; }
   .attempt .k { color: var(--muted); }
@@ -47,6 +48,10 @@
   .badge { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--panel2); border: 1px solid var(--border); }
   .o-success { color: var(--ok); } .o-bad_output, .o-provider_error, .o-error { color: var(--err); }
   .o-skipped_blackout { color: var(--muted); }
+  .attempt-resp { margin: -2px 0 8px; }
+  .attempt-resp > summary { cursor: pointer; color: var(--err); font-size: 11px; user-select: none; }
+  .attempt-resp > summary:hover { color: var(--accent); }
+  .attempt-resp > pre { margin-top: 6px; max-height: 220px; }
 </style>
 </head>
 <body>
@@ -75,6 +80,7 @@
 const rowsEl = document.getElementById('rows');
 const emptyEl = document.getElementById('empty');
 let timer = null;
+const expanded = new Set(); // ids of rows whose detail is open
 
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
@@ -87,32 +93,64 @@ function pretty(v) {
   catch { return typeof v === 'string' ? v : JSON.stringify(v); }
 }
 
-function attemptRow(a) {
-  return `<div class="attempt">
+function attemptRow(a, entryKey, idx) {
+  const head = `<div class="attempt">
     <span><span class="k">prov</span> ${esc(a.provider)}/${esc(a.model)}</span>
     <span><span class="k">key</span> <span class="mono">${esc(a.key)}</span> <span class="badge">${esc(a.key_type)}</span></span>
     <span><span class="k">http</span> ${esc(a.http_status)}</span>
     <span><span class="k">finish</span> ${esc(a.finish_reason || '-')}</span>
     <span><span class="k">ms</span> ${esc(a.latency_ms)}</span>
     <span class="o-${esc(a.outcome)}">${esc(a.outcome)}</span>
-  </div>` + (a.error ? `<div class="muted mono" style="margin:-2px 0 8px;font-size:11px">${esc(a.error)}</div>` : '');
+  </div>`;
+  const err = a.error ? `<div class="muted mono" style="margin:-2px 0 6px;font-size:11px">${esc(a.error)}</div>` : '';
+  const k = entryKey + '::att' + idx;
+  const resp = a.response
+    ? `<details class="attempt-resp" data-detailkey="${esc(k)}"><summary>failed response body</summary><pre class="nowrap" data-scrollkey="${esc(k)}">${esc(pretty(a.response))}</pre></details>`
+    : '';
+  return head + err + resp;
 }
 
-function detail(e) {
-  const attempts = (e.attempts || []).map(attemptRow).join('') || '<span class="muted">none</span>';
+function detail(e, entryKey) {
+  const attempts = (e.attempts || []).map((a, i) => attemptRow(a, entryKey, i)).join('') || '<span class="muted">none</span>';
   return `<td colspan="7">
     <div class="grid">
-      <div class="card"><h3>Request</h3><pre>${esc(pretty(e.request))}</pre></div>
-      <div class="card"><h3>Response</h3><pre>${esc(pretty(e.response))}</pre></div>
+      <div class="card"><h3>Request</h3><pre class="nowrap" data-scrollkey="${esc(entryKey + '::req')}">${esc(pretty(e.request))}</pre></div>
+      <div class="card"><h3>Response</h3><pre class="nowrap" data-scrollkey="${esc(entryKey + '::resp')}">${esc(pretty(e.response))}</pre></div>
     </div>
     <div class="attempts"><div class="card"><h3>Attempts (${(e.attempts||[]).length})</h3>${attempts}</div></div>
   </td>`;
 }
 
+// captureUIState records, by stable key, which nested <details> are open and
+// the scroll offsets of each text box, so they survive a re-render.
+function captureUIState() {
+  const open = {}, scroll = {};
+  rowsEl.querySelectorAll('[data-detailkey]').forEach(el => {
+    if (el.open) open[el.dataset.detailkey] = true;
+  });
+  rowsEl.querySelectorAll('[data-scrollkey]').forEach(el => {
+    if (el.scrollTop || el.scrollLeft) scroll[el.dataset.scrollkey] = [el.scrollTop, el.scrollLeft];
+  });
+  return { open, scroll };
+}
+
+function applyUIState(st) {
+  rowsEl.querySelectorAll('[data-detailkey]').forEach(el => {
+    if (st.open[el.dataset.detailkey]) el.open = true;
+  });
+  rowsEl.querySelectorAll('[data-scrollkey]').forEach(el => {
+    const s = st.scroll[el.dataset.scrollkey];
+    if (s) { el.scrollTop = s[0]; el.scrollLeft = s[1]; }
+  });
+}
+
 function render(entries) {
+  const scrollY = window.scrollY;
+  const ui = captureUIState();
   rowsEl.innerHTML = '';
   emptyEl.style.display = entries.length ? 'none' : 'block';
   entries.forEach((e, i) => {
+    const key = e.id || ('idx-' + i);
     const tr = document.createElement('tr');
     tr.className = 'row';
     const cls = e.success ? 'ok' : 'err';
@@ -127,14 +165,22 @@ function render(entries) {
       <td class="muted">${esc(e.latency_ms)} ms</td>`;
     const dt = document.createElement('tr');
     dt.className = 'detail';
-    dt.style.display = 'none';
-    dt.innerHTML = detail(e);
+    dt.style.display = expanded.has(key) ? 'table-row' : 'none';
+    dt.innerHTML = detail(e, key);
     tr.addEventListener('click', () => {
-      dt.style.display = dt.style.display === 'none' ? 'table-row' : 'none';
+      if (dt.style.display === 'none') {
+        dt.style.display = 'table-row';
+        expanded.add(key);
+      } else {
+        dt.style.display = 'none';
+        expanded.delete(key);
+      }
     });
     rowsEl.appendChild(tr);
     rowsEl.appendChild(dt);
   });
+  applyUIState(ui);
+  window.scrollTo(0, scrollY);
 }
 
 async function load() {

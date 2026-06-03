@@ -200,6 +200,7 @@ Practical implications:
 
 - Streaming (SSE) is not supported; requests are non-streaming so output can be verified before retrying.
 - Anthropic does not support embeddings; embedding requests routed there return an error and advance.
-- For translated dialects, pass-through of unknown arguments is best-effort (merged into `generationConfig` for Gemini, top-level for Anthropic). OpenAI is verbatim pass-through.
+- For translated dialects, pass-through of unknown arguments is best-effort. For Gemini, known top-level request fields (`toolConfig`, `safetySettings`, `systemInstruction`, `cachedContent`, `labels`, in camelCase or snake_case) are placed at the request root and an explicit `generationConfig` is merged in; all other extras go into `generationConfig`. For Anthropic, extras are merged top-level. OpenAI is verbatim pass-through.
+- **Gemini tool calling** is translated from the OpenAI shape: `tools` (`{type:"function", function:{...}}`) and the legacy `functions` array become Gemini `functionDeclarations` (the parameter JSON Schema is sanitized to the fields Gemini accepts, dropping e.g. `additionalProperties`/`$schema`), `tool_choice` becomes `toolConfig.functionCallingConfig`, assistant `tool_calls` and `tool` result messages become `functionCall`/`functionResponse` parts, and Gemini `functionCall` responses are converted back into OpenAI `tool_calls` (with `finish_reason: "tool_calls"`). Tools already in Gemini-native form (`{functionDeclarations:[...]}`) are passed through unchanged.
 - `max_tokens` is required by Anthropic; if omitted it defaults to 8192.
 

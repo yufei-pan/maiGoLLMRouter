@@ -46,6 +46,7 @@ type Attempt struct {
 	FinishReason string `json:"finish_reason,omitempty"`
 	Outcome      string `json:"outcome"`
 	Error        string `json:"error,omitempty"`
+	Response     string `json:"response,omitempty"` // raw downstream body for failed attempts
 	OutboundURL  string `json:"outbound_url,omitempty"`
 	LatencyMS    int64  `json:"latency_ms"`
 }
@@ -209,6 +210,9 @@ func (r *Router) callOnce(ctx context.Context, p *config.Provider, model string,
 
 	if err != nil || resp == nil || !resp.OK() {
 		att.Outcome = "provider_error"
+		if resp != nil {
+			att.Response = string(resp.RawResponse)
+		}
 		if err != nil {
 			att.Error = err.Error()
 		} else if resp != nil {
@@ -224,6 +228,7 @@ func (r *Router) callOnce(ctx context.Context, p *config.Provider, model string,
 	}
 	att.Outcome = "bad_output"
 	att.Error = "output did not finish normally"
+	att.Response = string(resp.RawResponse)
 	reason := resp.FinishReason
 	if reason == "" {
 		reason = "<none>"
