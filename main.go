@@ -33,15 +33,26 @@ func main() {
 	const defaultConfig = "config.toml"
 	var configPath string
 	var showVersion bool
+	var generateSystemd bool
 	flag.StringVar(&configPath, "config", defaultConfig, "path to TOML config file")
 	flag.StringVar(&configPath, "f", defaultConfig, "path to TOML config file (shorthand for --config)")
 	flag.BoolVar(&showVersion, "version", false, "print version and exit")
 	flag.BoolVar(&showVersion, "V", false, "print version and exit (shorthand for --version)")
+	flag.BoolVar(&generateSystemd, "generate-systemd", false, "write ./mai-go-llm-router.service and print install instructions")
 	flag.Usage = usage
 	flag.Parse()
 
 	if showVersion {
 		fmt.Printf("maiGoLLMRouter %s\n", version)
+		return
+	}
+
+	if generateSystemd {
+		outPath, err := writeSystemdUnit(configPath)
+		if err != nil {
+			log.Fatalf("generate-systemd: %v", err)
+		}
+		printSystemdInstallInstructions(outPath)
 		return
 	}
 
@@ -127,7 +138,7 @@ func logStartup(cfg *config.Config, configPath string) {
 func usage() {
 	w := flag.CommandLine.Output()
 	fmt.Fprintf(w, "maiGoLLMRouter %s - OpenAI-compatible LLM API router\n\n", version)
-	fmt.Fprintf(w, "Usage:\n  %s [-f|--config <path>] [-V|--version]   (config default: config.toml)\n\n", os.Args[0])
+	fmt.Fprintf(w, "Usage:\n  %s [-f|--config <path>] [-V|--version] [--generate-systemd]   (config default: config.toml)\n\n", os.Args[0])
 	fmt.Fprintf(w, "Flags:\n")
 	flag.PrintDefaults()
 	fmt.Fprintln(w)
