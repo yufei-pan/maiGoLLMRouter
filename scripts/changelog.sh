@@ -34,7 +34,10 @@ if command -v gh >/dev/null 2>&1; then
     -f "target_commitish=HEAD" \
     -f "previous_tag_name=${PREV_TAG}" \
     --jq .body 2>/dev/null)"; then
-    body="$notes"
+    # API often returns only the compare link before the tag exists.
+    if [[ "$notes" == *"What's Changed"* ]] || [[ "$notes" == *$'\n'-* ]]; then
+      body="$notes"
+    fi
   fi
 fi
 
@@ -49,4 +52,6 @@ ${commits}"
 fi
 
 printf '%s\n\n' "$body"
-echo "**Full Changelog**: ${COMPARE_URL}"
+if [[ "$body" != *"${COMPARE_URL}"* ]]; then
+  echo "**Full Changelog**: ${COMPARE_URL}"
+fi
