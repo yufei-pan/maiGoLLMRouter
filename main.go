@@ -95,7 +95,7 @@ func logStartup(cfg *config.Config, configPath string) {
 	log.Printf("maiGoLLMRouter %s", version)
 	log.Printf("config loaded from %s", abs)
 	log.Printf("inbound API type: OpenAI-compatible (bearer auth)")
-	log.Printf("inbound endpoint: %s/v1  (POST /v1/chat/completions, POST /v1/embeddings)", base)
+	log.Printf("inbound endpoint: %s/v1  (POST /v1/chat/completions, POST /v1/embeddings, GET /v1/models)", base)
 
 	if cfg.Server.GeneratedClientKey != "" {
 		log.Printf("client auth: no client_keys in config; generated one for this run:")
