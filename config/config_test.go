@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -200,3 +201,64 @@ keys = ["k"]
 		t.Fatal("expected error for unknown kind")
 	}
 }
+
+func TestModelSelectionDefaultSequential(t *testing.T) {
+	path := writeTemp(t, `
+[[provider]]
+name = "openai"
+kind = "openai"
+base_url = "https://api.openai.com"
+keys = ["k"]
+
+[model."m"]
+targets = ["openai/a", "openai/b"]
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := cfg.Models["m"].Selection; got != TargetSelectionSequential {
+		t.Errorf("selection = %q, want %q", got, TargetSelectionSequential)
+	}
+}
+
+func TestModelSelectionShuffleParsed(t *testing.T) {
+	for _, sel := range []string{"shuffle", "random", "SHUFFLE"} {
+		path := writeTemp(t, fmt.Sprintf(`
+[[provider]]
+name = "openai"
+kind = "openai"
+base_url = "https://api.openai.com"
+keys = ["k"]
+
+[model."m"]
+selection = %q
+targets = ["openai/a", "openai/b"]
+`, sel))
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("load selection=%q: %v", sel, err)
+		}
+		if got := cfg.Models["m"].Selection; got != TargetSelectionShuffle {
+			t.Errorf("selection=%q -> %q, want %q", sel, got, TargetSelectionShuffle)
+		}
+	}
+}
+
+func TestModelSelectionUnknownRejected(t *testing.T) {
+	path := writeTemp(t, `
+[[provider]]
+name = "openai"
+kind = "openai"
+base_url = "https://api.openai.com"
+keys = ["k"]
+
+[model."m"]
+selection = "round_robin"
+targets = ["openai/a"]
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for unknown selection")
+	}
+}
+

@@ -110,9 +110,22 @@ scalar fields (`kind`, `base_url`, `timeout`) from the **last** entry win.
 [model."gpt-4o"]
 targets = ["openai/gpt-4o", "google/gemini-1.5-pro"]
 
+[model."free"]
+selection = "shuffle"
+targets = ["google/gemma-4-31b-it", "openrouter/openrouter/free"]
+
 [routing]
 fallback_provider = "google"
 ```
+
+Optional `selection` controls how the expanded target list is ordered for each
+request:
+
+| Value        | Behavior                                            |
+| ------------ | --------------------------------------------------- |
+| `sequential` | Try targets in config order (default when omitted). |
+| `shuffle`    | Shuffle the expanded targets before each request.   |
+| `random`     | Alias for `shuffle`.                                |
 
 A target is either a `provider/model` pair or the **name of another defined
 model**, which is expanded in place (recursively, with cycle detection at load

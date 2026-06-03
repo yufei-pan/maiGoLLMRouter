@@ -74,7 +74,7 @@ const (
 // Resolve maps an inbound model name to an ordered list of targets (#12,#14,#15).
 func (r *Router) Resolve(model string) ([]config.Target, error) {
 	if route, ok := r.cfg.Models[model]; ok {
-		return route.Targets, nil
+		return orderedTargets(route.Targets, route.Selection), nil
 	}
 	// provider/model form.
 	if idx := strings.Index(model, "/"); idx > 0 && idx < len(model)-1 {
@@ -273,6 +273,16 @@ func shuffledKeys(keys []string) []string {
 	out := make([]string, len(keys))
 	copy(out, keys)
 	rand.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
+	return out
+}
+
+// orderedTargets returns a copy of targets, optionally shuffled per request.
+func orderedTargets(targets []config.Target, selection string) []config.Target {
+	out := make([]config.Target, len(targets))
+	copy(out, targets)
+	if selection == config.TargetSelectionShuffle && len(out) > 1 {
+		rand.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
+	}
 	return out
 }
 

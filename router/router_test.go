@@ -330,3 +330,67 @@ targets = ["openai/real-model"]
 		t.Errorf("attempts = %d, want 1 (no fallback round)", len(res.Attempts))
 	}
 }
+
+func TestResolveSequentialPreservesOrder(t *testing.T) {
+	cfg := loadCfg(t, `
+[[provider]]
+name = "openai"
+kind = "openai"
+base_url = "https://api.openai.com"
+keys = ["k"]
+
+[model."m"]
+targets = ["openai/first", "openai/second", "openai/third"]
+`)
+	r := New(cfg)
+	want := []string{"openai/first", "openai/second", "openai/third"}
+	for i := 0; i < 10; i++ {
+		targets, err := r.Resolve("m")
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		for j, tgt := range targets {
+			got := tgt.Provider + "/" + tgt.Model
+			if got != want[j] {
+				t.Fatalf("iteration %d: target[%d] = %q, want %q", i, j, got, want[j])
+			}
+		}
+	}
+}
+
+func TestResolveShuffleVariesOrder(t *testing.T) {
+	cfg := loadCfg(t, `
+[[provider]]
+name = "openai"
+kind = "openai"
+base_url = "https://api.openai.com"
+keys = ["k"]
+
+[model."m"]
+selection = "shuffle"
+targets = ["openai/first", "openai/second", "openai/third"]
+`)
+	r := New(cfg)
+	first := ""
+	same := 0
+	for i := 0; i < 30; i++ {
+		targets, err := r.Resolve("m")
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if len(targets) != 3 {
+			t.Fatalf("targets = %d, want 3", len(targets))
+		}
+		head := targets[0].Model
+		if first == "" {
+			first = head
+			continue
+		}
+		if head == first {
+			same++
+		}
+	}
+	if same == 29 {
+		t.Errorf("shuffle selection never changed first target across 30 resolves")
+	}
+}
