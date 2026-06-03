@@ -69,6 +69,40 @@ func (s *Store) Write(e Entry) error {
 	return nil
 }
 
+// Summary is a lightweight projection of an Entry for the log list view. It
+// deliberately omits the heavy Request, Response, and per-attempt bodies so the
+// list can be refreshed cheaply; the full record is fetched per entry via Get.
+type Summary struct {
+	Time          string `json:"time"`
+	ID            string `json:"id"`
+	ClientKey     string `json:"client_key"`
+	Endpoint      string `json:"endpoint"`
+	InboundModel  string `json:"inbound_model"`
+	Provider      string `json:"provider,omitempty"`
+	Model         string `json:"model,omitempty"`
+	Success       bool   `json:"success"`
+	Status        int    `json:"status"`
+	LatencyMS     int64  `json:"latency_ms"`
+	AttemptsCount int    `json:"attempts_count"`
+}
+
+// summaryView mirrors the subset of Entry needed to build a Summary. Attempts
+// is decoded as a raw array only to count its elements, avoiding decoding the
+// (potentially large) per-attempt payloads.
+type summaryView struct {
+	Time         string            `json:"time"`
+	ID           string            `json:"id"`
+	ClientKey    string            `json:"client_key"`
+	Endpoint     string            `json:"endpoint"`
+	InboundModel string            `json:"inbound_model"`
+	Provider     string            `json:"provider"`
+	Model        string            `json:"model"`
+	Success      bool              `json:"success"`
+	Status       int               `json:"status"`
+	LatencyMS    int64             `json:"latency_ms"`
+	Attempts     []json.RawMessage `json:"attempts"`
+}
+
 // Tail returns up to limit of the most recent entries, newest first.
 func (s *Store) Tail(limit int) ([]json.RawMessage, error) {
 	if limit <= 0 {
@@ -101,6 +135,74 @@ func (s *Store) Tail(limit int) ([]json.RawMessage, error) {
 		}
 	}
 	return out, nil
+}
+
+// TailSummaries returns up to limit of the most recent entries as lightweight
+// summaries (newest first), without the request/response/attempt bodies.
+func (s *Store) TailSummaries(limit int) ([]Summary, error) {
+	raw, err := s.Tail(limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Summary, 0, len(raw))
+	for _, line := range raw {
+		var v summaryView
+		if err := json.Unmarshal(line, &v); err != nil {
+			continue // skip malformed lines rather than fail the whole list
+		}
+		out = append(out, Summary{
+			Time:          v.Time,
+			ID:            v.ID,
+			ClientKey:     v.ClientKey,
+			Endpoint:      v.Endpoint,
+			InboundModel:  v.InboundModel,
+			Provider:      v.Provider,
+			Model:         v.Model,
+			Success:       v.Success,
+			Status:        v.Status,
+			LatencyMS:     v.LatencyMS,
+			AttemptsCount: len(v.Attempts),
+		})
+	}
+	return out, nil
+}
+
+// Get returns the full raw record for the entry with the given ID, scanning
+// newest files first. It returns (nil, nil) when no entry matches.
+func (s *Store) Get(id string) (json.RawMessage, error) {
+	if id == "" {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	matches, err := filepath.Glob(filepath.Join(s.dir, "*.jsonl"))
+	if err != nil {
+		return nil, err
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(matches))) // newest dates first
+
+	for _, path := range matches {
+		lines, err := readLines(path)
+		if err != nil {
+			continue
+		}
+		for i := len(lines) - 1; i >= 0; i-- {
+			if len(lines[i]) == 0 {
+				continue
+			}
+			var idOnly struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(lines[i], &idOnly); err != nil {
+				continue
+			}
+			if idOnly.ID == id {
+				return json.RawMessage(lines[i]), nil
+			}
+		}
+	}
+	return nil, nil
 }
 
 func readLines(path string) ([][]byte, error) {
