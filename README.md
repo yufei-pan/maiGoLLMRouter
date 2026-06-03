@@ -61,6 +61,31 @@ The server listens on `:8470` by default. The web UI is at
 of the required provider fields and where to obtain API keys, or
 `./maiGoLLMRouter -V` (`--version`) to print the version.
 
+### Running as a systemd service
+
+After you install the binary and `config.toml` where you want them to live
+(e.g. `/usr/local/bin/maiGoLLMRouter` and `/etc/maiGoLLMRouter/config.toml`), run
+`--generate-systemd` from the directory where you want the unit file written.
+It resolves absolute paths for `ExecStart`, `WorkingDirectory`, and your
+current login `User`/`Group`:
+
+```bash
+./maiGoLLMRouter --generate-systemd -f /etc/maiGoLLMRouter/config.toml
+```
+
+This writes `./mai-go-llm-router.service`. Install and start it:
+
+```bash
+sudo cp mai-go-llm-router.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now mai-go-llm-router
+```
+
+Check status or follow logs with `systemctl status mai-go-llm-router` and
+`journalctl -u mai-go-llm-router -f`. Edit `User=` / `Group=` in the unit
+file if needed, or re-run `--generate-systemd` after moving the binary or
+config so paths stay correct.
+
 ### Example request
 
 ```bash
