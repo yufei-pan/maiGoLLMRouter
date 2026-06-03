@@ -177,6 +177,25 @@ never written to disk (only masked forms appear).
 - `GET /ui` — HTML log viewer (embedded in the binary).
 - `GET /ui/logs?limit=N` — recent log entries as JSON.
 
+## Reasoning / thinking budgets
+
+Please note that different providers — and even different models from the same
+provider — likely expect **different reasoning / thinking budget parameters**
+(e.g. OpenAI's `reasoning_effort`, Anthropic's `thinking.budget_tokens`, Gemini's
+`thinkingConfig.thinkingBudget`). Unlike OpenRouter, maiGoLLMRouter does **not**
+adapt or normalize any of these to maintain broad compatibility — whatever
+reasoning fields you send are passed through to the downstream provider as-is.
+
+Practical implications:
+
+- If you want to specify reasoning, route to models of roughly the **same
+  generation / provider** so a single reasoning parameter stays valid across the
+  automatic model routing fallbacks. Mixing providers (or model generations) in a
+  target list means a reasoning field valid for one target may be rejected or
+  ignored by another.
+- Even within the same provider, follow that **provider's own docs** to set the
+  correct field name and value for the specific model you're targeting.
+
 ## Notes & limitations
 
 - Streaming (SSE) is not supported; requests are non-streaming so output can be verified before retrying.
