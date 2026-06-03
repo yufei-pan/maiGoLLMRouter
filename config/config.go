@@ -21,6 +21,12 @@ const (
 	DefaultTimeout        = 60 * time.Second
 )
 
+// Target selection methods for model alias routing.
+const (
+	TargetSelectionSequential = "sequential"
+	TargetSelectionShuffle    = "shuffle"
+)
+
 // DefaultGoodFinishReasons are the normalized finish reasons treated as a
 // successful completion when none are configured.
 var DefaultGoodFinishReasons = []string{"stop", "length", "tool_calls", "function_call", "end_turn"}
@@ -92,7 +98,8 @@ type Target struct {
 
 // ModelRoute is the ordered list of downstream targets for an inbound model.
 type ModelRoute struct {
-	Targets []Target
+	Targets   []Target
+	Selection string // TargetSelectionSequential or TargetSelectionShuffle
 }
 
 // raw* types mirror the on-disk TOML layout before normalization.
@@ -123,7 +130,8 @@ type rawProvider struct {
 }
 
 type rawModel struct {
-	Targets []string `toml:"targets"`
+	Targets   []string `toml:"targets"`
+	Selection string   `toml:"selection"` // sequential (default) | shuffle
 }
 
 type rawRouting struct {
@@ -244,18 +252,24 @@ func build(raw rawConfig) (*Config, error) {
 	// Model routes. A target is either a "provider/model" pair or the name of
 	// another defined model, which is expanded in place (recursively).
 	rawTargets := make(map[string][]string, len(raw.Model))
+	modelSelection := make(map[string]string, len(raw.Model))
 	for name, rm := range raw.Model {
 		if len(rm.Targets) == 0 {
 			return nil, fmt.Errorf("model %q: no targets", name)
 		}
 		rawTargets[name] = rm.Targets
+		sel, err := normalizeTargetSelection(rm.Selection, name)
+		if err != nil {
+			return nil, err
+		}
+		modelSelection[name] = sel
 	}
 	for name := range rawTargets {
 		targets, err := expandModel(name, rawTargets, nil)
 		if err != nil {
 			return nil, err
 		}
-		cfg.Models[name] = ModelRoute{Targets: targets}
+		cfg.Models[name] = ModelRoute{Targets: targets, Selection: modelSelection[name]}
 	}
 
 	if cfg.FallbackProvider != "" {
@@ -328,4 +342,20 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+func normalizeTargetSelection(s, modelName string) (string, error) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" {
+		return TargetSelectionSequential, nil
+	}
+	switch s {
+	case TargetSelectionSequential:
+		return TargetSelectionSequential, nil
+	case TargetSelectionShuffle, "random":
+		return TargetSelectionShuffle, nil
+	default:
+		return "", fmt.Errorf("model %q: unknown selection %q (want %q, %q, or random)",
+			modelName, s, TargetSelectionSequential, TargetSelectionShuffle)
+	}
 }

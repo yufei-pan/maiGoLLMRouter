@@ -72,9 +72,14 @@ keys = ["sk-ant-real-key"]
 # targets. Models are tried in order; for each provider, all normal keys are
 # tried (random order) before the next model. If all normal keys for all
 # models are exhausted, fallback keys are tried for the models in the list.
+#
+# selection (optional): how expanded targets are ordered for each request.
+#   "sequential" (default) — try targets in the order listed in targets.
+#   "shuffle" or "random"  — shuffle the expanded target list before each try.
 # ---------------------------------------------------------------------------
 
 [model."free"]
+selection = "shuffle"
 targets = ["google/gemma-4-31b-it", "google/gemma-4-26b-a4b-it","openrouter/google/gemma-4-31b-it","openrouter/openrouter/free"]
 
 [model."chat"]
