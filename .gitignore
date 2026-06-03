@@ -6,6 +6,7 @@
 # Local config and logs
 /config.toml
 /logs/
+/mai-go-llm-router.service
 
 # OS / editor
 .DS_Store
