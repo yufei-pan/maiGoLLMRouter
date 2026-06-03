@@ -68,6 +68,7 @@ const (
 	outcomeSuccess outcome = iota
 	outcomeBadOutput
 	outcomeProviderError
+	outcomeCanceled // inbound request context canceled (caller went away)
 )
 
 // Resolve maps an inbound model name to an ordered list of targets (#12,#14,#15).
@@ -181,6 +182,11 @@ func (r *Router) tryKey(ctx context.Context, res *Result, p *config.Provider, mo
 			res.Provider = p.Name
 			res.Model = model
 			return true
+		case outcomeCanceled:
+			// Caller went away: stop the whole routing run without blackout.
+			res.Status = 499 // "Client Closed Request" (nginx convention)
+			res.Body = errorBody("request canceled by caller", "request_canceled")
+			return true
 		case outcomeProviderError:
 			if keyType == "normal" {
 				r.blackout.Fail(key)
@@ -206,6 +212,15 @@ func (r *Router) callOnce(ctx context.Context, p *config.Provider, model string,
 		att.HTTPStatus = resp.HTTPStatus
 		att.FinishReason = resp.FinishReason
 		att.OutboundURL = resp.OutboundURL
+	}
+
+	// If the inbound request context is done, the caller disconnected or hit its
+	// own deadline. Do not blacken keys or keep trying other keys/models: the
+	// failure is on the caller side and the response can't be delivered anyway.
+	if ctx.Err() != nil {
+		att.Outcome = "canceled"
+		att.Error = ctx.Err().Error()
+		return resp, att, outcomeCanceled
 	}
 
 	if err != nil || resp == nil || !resp.OK() {
