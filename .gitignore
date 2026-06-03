@@ -1,0 +1,10 @@
+# Binaries
+/maiGoLLMRouter
+*.exe
+
+# Local config and logs
+/config.toml
+/logs/
+
+# OS / editor
+.DS_Store

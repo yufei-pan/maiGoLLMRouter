@@ -1,0 +1,98 @@
+# maiGoLLMRouter example configuration.
+# Copy to config.toml and edit. Run with: ./maiGoLLMRouter -config config.toml
+
+[server]
+listen = ":8470"
+log_dir = "./logs"
+
+# Inbound OpenAI-style bearer tokens accepted by this router.
+# If this list is empty, a random key is generated at startup and printed to
+# the log so the inbound API is never left unauthenticated.
+client_keys = []
+
+# Global blackout window applied to a NORMAL key after it fails.
+# Fallback keys are never blacked out.
+global_blackout = "60s"
+
+# Number of retries on the SAME key when the output did not finish normally.
+# Transport/HTTP errors do not retry; they fail the key and advance.
+max_retries = 2
+
+# Normalized finish reasons considered a successful completion.
+# Dialect-specific reasons are normalized: gemini STOP/MAX_TOKENS -> stop/length,
+# anthropic end_turn/max_tokens/tool_use -> stop/length/tool_calls.
+# "length" means the client-requested max_tokens limit was hit (a normal completion).
+good_finish_reasons = ["stop", "length", "tool_calls", "function_call", "end_turn"]
+
+# ---------------------------------------------------------------------------
+# Providers. The [[provider]] block is repeatable.
+#  - Same-name providers are MERGED: keys/fallback_keys/fallback_models are
+#    combined; kind/base_url/timeout from later entries OVERWRITE earlier.
+#  - kind selects the outbound dialect: "openai" | "anthropic" | "gemini".
+#  - keys           : normal keys, a random one is tried first, blacked out on failure.
+#  - fallback_keys  : tried in listed order after all normal keys/models fail; never blacked out.
+#                     If omitted but fallback_models is set, the normal keys are
+#                     reused for the fallback round (still never blacked out).
+#  - fallback_models: models permitted on the fallback round; empty = all allowed.
+# ---------------------------------------------------------------------------
+
+[[provider]]
+name = "google"
+kind = "gemini"
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+timeout = "360s"
+keys = ["AIza-normal-key-1", "AIza-normal-key-2"]
+fallback_keys = ["AIza-backup-key"]
+fallback_models = ["gemini-3.5-pro"]
+
+[[provider]]
+name = "openai"
+kind = "openai"
+base_url = "https://api.openai.com/v1"
+timeout = "360s"
+keys = ["sk-openai-real-key"]
+
+[[provider]]
+name = "openrouter"
+kind = "openai"
+base_url = "https://openrouter.ai/api/v1"
+timeout = "360s"
+keys = ["sk-or-v1-real-key"]
+fallback_models = ["openrouter/free"]
+
+[[provider]]
+name = "anthropic"
+kind = "anthropic"
+base_url = "https://api.anthropic.com/v1"
+timeout = "360s"
+keys = ["sk-ant-real-key"]
+
+# ---------------------------------------------------------------------------
+# Model routing. Inbound model name -> ordered list of provider/model
+# targets. Models are tried in order; for each provider, all normal keys are
+# tried (random order) before the next model. If all normal keys for all
+# models are exhausted, fallback keys are tried for the models in the list.
+# ---------------------------------------------------------------------------
+
+[model."free"]
+targets = ["google/gemma-4-31b-it", "google/gemma-4-26b-a4b-it","openrouter/google/gemma-4-31b-it","openrouter/openrouter/free"]
+
+[model."chat"]
+targets = ["google/gemini-3.5-flash","free"]
+
+[model."gemini-embedding-2"]
+targets = ["google/gemini-embedding-2"]
+
+# ---------------------------------------------------------------------------
+# Unrecognized inbound model names:
+#  - "provider/model" with a known provider routes directly (remainder is the model,
+#    e.g. openrouter/google/gemma-4 -> openrouter, model "google/gemma-4").
+#  - "provider/model" with an unknown provider, or a bare unmapped name, routes to
+#    fallback_provider using the FULL name (e.g. nvidia/nemotron-3 -> fallback,
+#    model "nvidia/nemotron-3"; free -> fallback, model "free").
+#  - If fallback_provider is not a defined provider, it is treated as no fallback
+#    and such names return an error.
+# ---------------------------------------------------------------------------
+
+[routing]
+fallback_provider = "openrouter"

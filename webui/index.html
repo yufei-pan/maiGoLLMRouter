@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>maiGoLLMRouter — Logs</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel2: #1e222b; --border: #2a2f3a;
+    --text: #e6e9ef; --muted: #8a93a6; --accent: #6ea8fe; --ok: #3fb950; --err: #f85149;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; padding: 14px 20px;
+    border-bottom: 1px solid var(--border); background: var(--panel); position: sticky; top: 0; z-index: 5; }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .spacer { flex: 1; }
+  header label { color: var(--muted); font-size: 13px; }
+  input, button, select { background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 13px; }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  .wrap { padding: 16px 20px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; position: sticky; top: 53px; background: var(--bg); }
+  tr.row { cursor: pointer; }
+  tr.row:hover { background: var(--panel); }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+  .pill.ok { background: rgba(63,185,80,.15); color: var(--ok); }
+  .pill.err { background: rgba(248,81,73,.15); color: var(--err); }
+  .mono { font-family: var(--mono); }
+  .muted { color: var(--muted); }
+  .detail td { background: var(--panel); }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .card { background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+  .card h3 { margin: 0 0 8px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: var(--mono);
+    font-size: 12px; max-height: 360px; overflow: auto; }
+  .attempts { margin-top: 12px; }
+  .attempt { display: grid; grid-template-columns: 1fr 1fr 90px 110px 90px 90px;
+    gap: 8px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 6px; font-size: 12px; }
+  .attempt .k { color: var(--muted); }
+  .empty { color: var(--muted); padding: 40px; text-align: center; }
+  .badge { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--panel2); border: 1px solid var(--border); }
+  .o-success { color: var(--ok); } .o-bad_output, .o-provider_error, .o-error { color: var(--err); }
+  .o-skipped_blackout { color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>maiGoLLMRouter</h1>
+  <span class="muted" style="font-size:13px">request logs</span>
+  <div class="spacer"></div>
+  <label>limit <input id="limit" type="number" value="100" min="1" style="width:80px" /></label>
+  <label><input id="auto" type="checkbox" /> auto-refresh</label>
+  <button id="refresh">Refresh</button>
+</header>
+<div class="wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Time</th><th>Status</th><th>Endpoint</th><th>Inbound model</th>
+        <th>Served by</th><th>Attempts</th><th>Latency</th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div id="empty" class="empty" style="display:none">No log entries yet.</div>
+</div>
+
+<script>
+const rowsEl = document.getElementById('rows');
+const emptyEl = document.getElementById('empty');
+let timer = null;
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function fmtTime(t) { try { return new Date(t).toLocaleString(); } catch { return t; } }
+function pretty(v) {
+  if (v == null || v === '') return '';
+  try { return JSON.stringify(typeof v === 'string' ? JSON.parse(v) : v, null, 2); }
+  catch { return typeof v === 'string' ? v : JSON.stringify(v); }
+}
+
+function attemptRow(a) {
+  return `<div class="attempt">
+    <span><span class="k">prov</span> ${esc(a.provider)}/${esc(a.model)}</span>
+    <span><span class="k">key</span> <span class="mono">${esc(a.key)}</span> <span class="badge">${esc(a.key_type)}</span></span>
+    <span><span class="k">http</span> ${esc(a.http_status)}</span>
+    <span><span class="k">finish</span> ${esc(a.finish_reason || '-')}</span>
+    <span><span class="k">ms</span> ${esc(a.latency_ms)}</span>
+    <span class="o-${esc(a.outcome)}">${esc(a.outcome)}</span>
+  </div>` + (a.error ? `<div class="muted mono" style="margin:-2px 0 8px;font-size:11px">${esc(a.error)}</div>` : '');
+}
+
+function detail(e) {
+  const attempts = (e.attempts || []).map(attemptRow).join('') || '<span class="muted">none</span>';
+  return `<td colspan="7">
+    <div class="grid">
+      <div class="card"><h3>Request</h3><pre>${esc(pretty(e.request))}</pre></div>
+      <div class="card"><h3>Response</h3><pre>${esc(pretty(e.response))}</pre></div>
+    </div>
+    <div class="attempts"><div class="card"><h3>Attempts (${(e.attempts||[]).length})</h3>${attempts}</div></div>
+  </td>`;
+}
+
+function render(entries) {
+  rowsEl.innerHTML = '';
+  emptyEl.style.display = entries.length ? 'none' : 'block';
+  entries.forEach((e, i) => {
+    const tr = document.createElement('tr');
+    tr.className = 'row';
+    const cls = e.success ? 'ok' : 'err';
+    const served = e.provider ? `${esc(e.provider)}/${esc(e.model)}` : '<span class="muted">—</span>';
+    tr.innerHTML = `
+      <td class="muted">${esc(fmtTime(e.time))}</td>
+      <td><span class="pill ${cls}">${esc(e.status)}</span></td>
+      <td>${esc(e.endpoint)}</td>
+      <td class="mono">${esc(e.inbound_model)}</td>
+      <td class="mono">${served}</td>
+      <td>${(e.attempts||[]).length}</td>
+      <td class="muted">${esc(e.latency_ms)} ms</td>`;
+    const dt = document.createElement('tr');
+    dt.className = 'detail';
+    dt.style.display = 'none';
+    dt.innerHTML = detail(e);
+    tr.addEventListener('click', () => {
+      dt.style.display = dt.style.display === 'none' ? 'table-row' : 'none';
+    });
+    rowsEl.appendChild(tr);
+    rowsEl.appendChild(dt);
+  });
+}
+
+async function load() {
+  const limit = document.getElementById('limit').value || 100;
+  try {
+    const res = await fetch('/ui/logs?limit=' + encodeURIComponent(limit));
+    const data = await res.json();
+    render(data.entries || []);
+  } catch (err) {
+    emptyEl.style.display = 'block';
+    emptyEl.textContent = 'Failed to load logs: ' + err;
+  }
+}
+
+document.getElementById('refresh').addEventListener('click', load);
+document.getElementById('auto').addEventListener('change', (e) => {
+  if (e.target.checked) timer = setInterval(load, 3000);
+  else clearInterval(timer);
+});
+load();
+</script>
+</body>
+</html>
