@@ -34,11 +34,17 @@ To build release archives locally (requires Go 1.26+):
 
 ```bash
 chmod +x scripts/release.sh
-./scripts/release.sh 0.1.0
+./scripts/release.sh 0.1.1
 ```
 
-Artifacts land in `dist/`. Tag `v0.1.0` and push to trigger the GitHub Actions
-release workflow, or upload `dist/*` manually with `gh release create`.
+Artifacts land in `dist/`. Release notes since the previous tag:
+
+```bash
+./scripts/release-notes.sh 0.1.1 v0.1.0 > dist/RELEASE_NOTES.md
+```
+
+Tag `v0.1.1` and push to trigger the GitHub Actions release workflow, or
+upload `dist/*` manually with `gh release create`.
 
 ## Quick start
 
