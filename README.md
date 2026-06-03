@@ -23,6 +23,23 @@ Minimal dependencies: the Go standard library plus one TOML parser
 - **Pass-through** of unknown request arguments to the downstream provider.
 - **JSONL request/response logging** with masked keys, viewable in an embedded web UI.
 
+## Releases
+
+Pre-built binaries for Linux, macOS, and Windows (`amd64` / `arm64` where
+applicable) are attached to [GitHub
+Releases](https://github.com/yufei-pan/maiGoLLMRouter/releases). Verify with
+`sha256sum -c SHA256SUMS.txt` after download.
+
+To build release archives locally (requires Go 1.26+):
+
+```bash
+chmod +x scripts/release.sh
+./scripts/release.sh 0.1.0
+```
+
+Artifacts land in `dist/`. Tag `v0.1.0` and push to trigger the GitHub Actions
+release workflow, or upload `dist/*` manually with `gh release create`.
+
 ## Quick start
 
 Requires Go 1.26+.

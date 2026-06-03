@@ -1,6 +1,7 @@
 # Binaries
 /maiGoLLMRouter
 *.exe
+/dist/
 
 # Local config and logs
 /config.toml
