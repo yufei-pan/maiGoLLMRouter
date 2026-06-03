@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -183,6 +184,51 @@ targets = ["openai/real-model"]
 	}
 	if badOutputs != 3 {
 		t.Errorf("bad_output attempts = %d, want 3", badOutputs)
+	}
+}
+
+func TestExecuteStripsStreamingControlsForOpenAIProvider(t *testing.T) {
+	var sawStream bool
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var outbound map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&outbound); err != nil {
+			t.Fatalf("decode outbound body: %v", err)
+		}
+		_, sawStream = outbound["stream"]
+		if sawStream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n")
+			return
+		}
+		fmt.Fprint(w, chatStop)
+	}))
+	defer srv.Close()
+
+	cfg := loadCfg(t, fmt.Sprintf(`
+[[provider]]
+name = "openai"
+kind = "openai"
+base_url = %q
+keys = ["n1"]
+
+[model."m"]
+targets = ["openai/real-model"]
+`, srv.URL))
+
+	req := chatReq()
+	req["stream"] = true
+	req["stream_options"] = map[string]any{"include_usage": true}
+	res := New(cfg).Execute(context.Background(), provider.OpChat, "m", req)
+	if !res.Success {
+		t.Fatalf("expected success for streaming-style inbound request, attempts=%+v", res.Attempts)
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1", calls)
+	}
+	if sawStream {
+		t.Fatalf("downstream request still included stream field")
 	}
 }
 
