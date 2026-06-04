@@ -7,11 +7,14 @@ import (
 )
 
 // callOpenAI handles the OpenAI dialect, which is a near pass-through: the
-// inbound body is forwarded verbatim (with the model name overridden), so all
-// extra arguments pass through automatically (#13).
+// inbound body is forwarded with the model name overridden. Streaming controls
+// are stripped because the router buffers and verifies complete JSON responses.
 func callOpenAI(ctx context.Context, client *http.Client, baseURL, apiKey string, req Request) (*Response, error) {
 	body := make(map[string]any, len(req.Body)+1)
 	for k, v := range req.Body {
+		if k == "stream" || k == "stream_options" {
+			continue
+		}
 		body[k] = v
 	}
 	body["model"] = req.Model
