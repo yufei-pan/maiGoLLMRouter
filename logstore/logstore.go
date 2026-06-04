@@ -83,7 +83,9 @@ type Summary struct {
 	Success       bool   `json:"success"`
 	Status        int    `json:"status"`
 	LatencyMS     int64  `json:"latency_ms"`
-	AttemptsCount int    `json:"attempts_count"`
+	AttemptsCount    int `json:"attempts_count"`
+	PromptTokens     int `json:"prompt_tokens,omitempty"`
+	CompletionTokens int `json:"completion_tokens,omitempty"`
 }
 
 // summaryView mirrors the subset of Entry needed to build a Summary. Attempts
@@ -101,6 +103,7 @@ type summaryView struct {
 	Status       int               `json:"status"`
 	LatencyMS    int64             `json:"latency_ms"`
 	Attempts     []json.RawMessage `json:"attempts"`
+	Response     json.RawMessage   `json:"response"`
 }
 
 // Tail returns up to limit of the most recent entries, newest first.
@@ -150,7 +153,7 @@ func (s *Store) TailSummaries(limit int) ([]Summary, error) {
 		if err := json.Unmarshal(line, &v); err != nil {
 			continue // skip malformed lines rather than fail the whole list
 		}
-		out = append(out, Summary{
+		sm := Summary{
 			Time:          v.Time,
 			ID:            v.ID,
 			ClientKey:     v.ClientKey,
@@ -162,7 +165,12 @@ func (s *Store) TailSummaries(limit int) ([]Summary, error) {
 			Status:        v.Status,
 			LatencyMS:     v.LatencyMS,
 			AttemptsCount: len(v.Attempts),
-		})
+		}
+		if p, c, ok := computeUsage(v.Success, v.Response, v.Attempts); ok {
+			sm.PromptTokens = p
+			sm.CompletionTokens = c
+		}
+		out = append(out, sm)
 	}
 	return out, nil
 }

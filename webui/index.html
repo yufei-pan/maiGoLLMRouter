@@ -68,7 +68,7 @@
     <thead>
       <tr>
         <th>Time</th><th>Status</th><th>Endpoint</th><th>Inbound model</th>
-        <th>Served by</th><th>Attempts</th><th>Latency</th>
+        <th>Served by</th><th>Attempts</th><th>In tokens</th><th>Out tokens</th><th>Latency</th>
       </tr>
     </thead>
     <tbody id="rows"></tbody>
@@ -93,6 +93,66 @@ function pretty(v) {
   catch { return typeof v === 'string' ? v : JSON.stringify(v); }
 }
 
+function failedAttemptOutcome(outcome) {
+  return outcome === 'bad_output' || outcome === 'provider_error' ||
+    outcome === 'error' || outcome === 'canceled';
+}
+
+function parseUsageBody(body) {
+  if (body == null || body === '') return { in: null, out: null };
+  try {
+    if (typeof body === 'string') body = JSON.parse(body);
+    if (body.usage) {
+      const u = body.usage;
+      if (u.prompt_tokens != null || u.completion_tokens != null) {
+        return { in: u.prompt_tokens ?? null, out: u.completion_tokens ?? null };
+      }
+      if (u.input_tokens != null || u.output_tokens != null) {
+        return { in: u.input_tokens ?? null, out: u.output_tokens ?? null };
+      }
+    }
+    if (body.usageMetadata) {
+      const m = body.usageMetadata;
+      let out = m.candidatesTokenCount ?? null;
+      if (out == null || out === 0) out = m.thoughtsTokenCount ?? null;
+      if ((out == null || out === 0) && m.totalTokenCount != null && m.promptTokenCount != null) {
+        const rest = m.totalTokenCount - m.promptTokenCount;
+        if (rest > 0) out = rest;
+      }
+      return { in: m.promptTokenCount ?? null, out };
+    }
+  } catch { /* ignore */ }
+  return { in: null, out: null };
+}
+
+function usageFromEntry(e) {
+  if (e.prompt_tokens != null || e.completion_tokens != null) {
+    return { in: e.prompt_tokens, out: e.completion_tokens };
+  }
+  if (e.success) {
+    return parseUsageBody(e.response);
+  }
+  let prompt = null;
+  let outSum = 0;
+  let hasOut = false;
+  for (const att of (e.attempts || [])) {
+    if (!failedAttemptOutcome(att.outcome) || !att.response) continue;
+    const u = parseUsageBody(att.response);
+    if (u.in != null) prompt = prompt == null ? u.in : Math.max(prompt, u.in);
+    if (u.out != null) {
+      outSum += u.out;
+      hasOut = true;
+    }
+  }
+  const top = parseUsageBody(e.response);
+  if (prompt == null && top.in != null) prompt = top.in;
+  return { in: prompt, out: hasOut ? outSum : null };
+}
+
+function fmtTokens(n) {
+  return n == null ? '<span class="muted">—</span>' : esc(String(n));
+}
+
 function attemptRow(a, entryKey, idx) {
   const head = `<div class="attempt">
     <span><span class="k">prov</span> ${esc(a.provider)}/${esc(a.model)}</span>
@@ -113,8 +173,12 @@ function attemptRow(a, entryKey, idx) {
 // detailInner builds the contents of an expanded row's detail cell from a full
 // entry record (fetched lazily on expansion).
 function detailInner(e, entryKey) {
+  const u = usageFromEntry(e);
+  const usageBar = `<div class="muted" style="margin-bottom:10px;font-size:12px">
+    <span class="k">tokens</span> in ${fmtTokens(u.in)} · out ${fmtTokens(u.out)}
+  </div>`;
   const attempts = (e.attempts || []).map((a, i) => attemptRow(a, entryKey, i)).join('') || '<span class="muted">none</span>';
-  return `<div class="grid">
+  return `${usageBar}<div class="grid">
       <div class="card"><h3>Request</h3><pre class="nowrap" data-scrollkey="${esc(entryKey + '::req')}">${esc(pretty(e.request))}</pre></div>
       <div class="card"><h3>Response</h3><pre class="nowrap" data-scrollkey="${esc(entryKey + '::resp')}">${esc(pretty(e.response))}</pre></div>
     </div>
@@ -186,6 +250,7 @@ function render(entries) {
     tr.className = 'row';
     const cls = e.success ? 'ok' : 'err';
     const served = e.provider ? `${esc(e.provider)}/${esc(e.model)}` : '<span class="muted">—</span>';
+    const u = usageFromEntry(e);
     tr.innerHTML = `
       <td class="muted">${esc(fmtTime(e.time))}</td>
       <td><span class="pill ${cls}">${esc(e.status)}</span></td>
@@ -193,11 +258,13 @@ function render(entries) {
       <td class="mono">${esc(e.inbound_model)}</td>
       <td class="mono">${served}</td>
       <td>${esc(e.attempts_count)}</td>
+      <td class="mono">${fmtTokens(u.in)}</td>
+      <td class="mono">${fmtTokens(u.out)}</td>
       <td class="muted">${esc(e.latency_ms)} ms</td>`;
     const dt = document.createElement('tr');
     dt.className = 'detail';
     const td = document.createElement('td');
-    td.colSpan = 7;
+    td.colSpan = 9;
     dt.appendChild(td);
     const isOpen = expanded.has(key);
     dt.style.display = isOpen ? 'table-row' : 'none';
