@@ -139,7 +139,7 @@ func (r *Router) Execute(ctx context.Context, op provider.Operation, inboundMode
 			continue
 		}
 		for _, key := range shuffledKeys(p.Keys) {
-			if r.blackout.Blocked(key) {
+			if r.blackout.Blocked(key, t.Model) {
 				res.Attempts = append(res.Attempts, Attempt{
 					Provider: p.Name, Model: t.Model, Key: maskKey(key),
 					KeyType: "normal", Outcome: "skipped_blackout",
@@ -205,7 +205,7 @@ func (r *Router) tryKey(ctx context.Context, res *Result, p *config.Provider, mo
 			return true
 		case outcomeProviderError:
 			if keyType == "normal" {
-				r.blackout.Fail(key)
+				r.blackout.Fail(key, model)
 			}
 			return false
 		case outcomeBadOutput:
