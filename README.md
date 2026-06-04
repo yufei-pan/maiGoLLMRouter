@@ -15,7 +15,7 @@ Minimal dependencies: the Go standard library plus one TOML parser
 - **Outbound dialect translation**: OpenAI (pass-through), Anthropic (`/messages`), Gemini (`:generateContent` / `:batchEmbedContents`). The version segment comes from each provider's `base_url`. Responses are translated back to OpenAI format.
 - **Multiple normal keys per provider**, one chosen at random; all are tried before advancing.
 - **Ordered fallback keys** per provider, tried only after every normal key/model is exhausted; never blacked out.
-- **Key blackout**: a normal key that fails is skipped for a configurable global duration.
+- **Key blackout**: a normal key that fails for a given model is skipped for that model for a configurable duration; the same key stays usable for other models.
 - **Allowed-models gating** for fallback keys.
 - **Output verification + retry**: chat responses must have content and a "good" finish reason; otherwise the request is retried (bounded, no blackout).
 - **Chat and embeddings** support.
@@ -108,7 +108,7 @@ See `[config.example.toml](config.example.toml)` for a fully commented example.
 | `listen`              | Bind address (default `:8470`).                                                                            |
 | `log_dir`             | Directory for JSONL logs (default `./logs`).                                                               |
 | `client_keys`         | Accepted inbound bearer tokens. **If empty, a random key is generated at startup and printed to the log.** |
-| `global_blackout`     | Duration a failed normal key is skipped (default `60s`).                                                   |
+| `global_blackout`     | Duration a failed normal (key, model) combination is skipped (default `60s`).                              |
 | `max_retries`         | Retries on the same key when output didn't finish normally (default `2`).                                  |
 | `good_finish_reasons` | Normalized finish reasons treated as success.                                                              |
 
@@ -216,7 +216,7 @@ resolve inbound model -> ordered [provider/model] targets
 for each target in order:
     shuffle the provider's normal keys
     for each non-blacked-out key:
-        call; on transport/HTTP error -> blackout key, next key
+        call; on transport/HTTP error -> blackout (key, model), next key
               on bad/unfinished output -> retry up to max_retries (no blackout), then next key
               on success -> return
 

@@ -98,11 +98,15 @@ targets = ["openai/real-model"]
 	if !res.Success {
 		t.Fatalf("expected fallback success, attempts=%+v", res.Attempts)
 	}
-	// Both normal keys should now be blacked out.
-	if !r.blackout.Blocked("n1") || !r.blackout.Blocked("n2") {
+	// Both normal keys should now be blacked out for the failed model.
+	if !r.blackout.Blocked("n1", "real-model") || !r.blackout.Blocked("n2", "real-model") {
 		t.Errorf("normal keys should be blacked out")
 	}
-	if r.blackout.Blocked("f1") {
+	// The same keys must remain usable for a different model.
+	if r.blackout.Blocked("n1", "other-model") || r.blackout.Blocked("n2", "other-model") {
+		t.Errorf("normal keys should not be blacked out for a different model")
+	}
+	if r.blackout.Blocked("f1", "real-model") {
 		t.Errorf("fallback key must never be blacked out")
 	}
 	// Last attempt should be the successful fallback key.

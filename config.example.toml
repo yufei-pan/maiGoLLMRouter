@@ -10,8 +10,9 @@ log_dir = "./logs"
 # the log so the inbound API is never left unauthenticated.
 client_keys = []
 
-# Global blackout window applied to a NORMAL key after it fails.
-# Fallback keys are never blacked out.
+# Global blackout window applied to a NORMAL (key, model) combination after it
+# fails. The same key stays usable for other models. Fallback keys are never
+# blacked out.
 global_blackout = "60s"
 
 # Number of retries on the SAME key when the output did not finish normally.
