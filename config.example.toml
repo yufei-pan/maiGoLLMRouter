@@ -5,6 +5,11 @@
 listen = ":8470"
 log_dir = "./logs"
 
+# How long to keep per-request detail log files (./logs/YYYY-MM/DD/<id>.json.zst)
+# and their index rows before they are automatically deleted. Default is 60
+# days (~2 months). Set to 0 to disable cleanup and keep logs indefinitely.
+log_retention_days = 60
+
 # Inbound OpenAI-style bearer tokens accepted by this router.
 # If this list is empty, a random key is generated at startup and printed to
 # the log so the inbound API is never left unauthenticated.

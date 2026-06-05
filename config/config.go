@@ -19,6 +19,9 @@ const (
 	DefaultGlobalBlackout = 60 * time.Second
 	DefaultMaxRetries     = 2
 	DefaultTimeout        = 60 * time.Second
+	// DefaultLogRetentionDays is how long detail log files are kept before
+	// cleanup. Roughly two months. Set log_retention_days = 0 to disable.
+	DefaultLogRetentionDays = 60
 )
 
 // Target selection methods for model alias routing.
@@ -50,6 +53,7 @@ type Config struct {
 type Server struct {
 	Listen            string
 	LogDir            string
+	LogRetention      time.Duration // detail logs older than this are deleted; 0 disables
 	ClientKeys        []string
 	GlobalBlackout    time.Duration
 	MaxRetries        int
@@ -120,6 +124,7 @@ type rawConfig struct {
 type rawServer struct {
 	Listen            string   `toml:"listen"`
 	LogDir            string   `toml:"log_dir"`
+	LogRetentionDays  *int     `toml:"log_retention_days"`
 	ClientKeys        []string `toml:"client_keys"`
 	GlobalBlackout    string   `toml:"global_blackout"`
 	MaxRetries        int      `toml:"max_retries"`
@@ -184,6 +189,15 @@ func build(raw rawConfig) (*Config, error) {
 	if srv.MaxRetries < 0 {
 		srv.MaxRetries = 0
 	}
+	// Log retention: default ~2 months; explicit 0 (or negative) disables cleanup.
+	retentionDays := DefaultLogRetentionDays
+	if raw.Server.LogRetentionDays != nil {
+		retentionDays = *raw.Server.LogRetentionDays
+	}
+	if retentionDays < 0 {
+		retentionDays = 0
+	}
+	srv.LogRetention = time.Duration(retentionDays) * 24 * time.Hour
 	if raw.Server.GlobalBlackout == "" {
 		srv.GlobalBlackout = DefaultGlobalBlackout
 	} else {

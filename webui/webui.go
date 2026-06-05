@@ -4,6 +4,7 @@ package webui
 import (
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 
@@ -23,32 +24,62 @@ func Register(mux *http.ServeMux, logs *logstore.Store) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(indexHTML)
 	})
-	// /ui/logs returns only lightweight summaries for the list view. The heavy
+	// /ui/logs returns lightweight index rows for the list view. The heavy
 	// request/response/attempt bodies are fetched per entry, on expansion, via
-	// /ui/logs/entry so periodic refreshes stay small.
+	// /ui/logs/entry so periodic refreshes stay small. The response always
+	// carries the server time so the client can cursor by server-issued
+	// timestamps instead of its own (possibly skewed) clock.
+	//
+	// Modes (newest first in every case):
+	//   - no params:        the cached recent entries (initial page load)
+	//   - ?since=<ts>:      only entries strictly newer than ts (auto-refresh)
+	//   - ?before=<ts>&limit=N: up to N entries older than ts (infinite scroll)
 	mux.HandleFunc("/ui/logs", func(w http.ResponseWriter, r *http.Request) {
-		limit := 100
-		if v := r.URL.Query().Get("limit"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				limit = n
+		q := r.URL.Query()
+		var (
+			entries []logstore.IndexEntry
+			err     error
+		)
+		switch {
+		case q.Get("before") != "":
+			limit := 50
+			if v := q.Get("limit"); v != "" {
+				if n, e := strconv.Atoi(v); e == nil && n > 0 {
+					limit = n
+				}
 			}
+			entries, err = logs.Before(q.Get("before"), limit)
+		case q.Get("since") != "":
+			entries = logs.Since(q.Get("since"))
+		default:
+			entries = logs.Recent()
 		}
-		entries, err := logs.TailSummaries(limit)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		if entries == nil {
+			entries = []logstore.IndexEntry{}
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"entries": entries})
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"entries":     entries,
+			"server_time": logs.ServerTime(),
+		})
 	})
-	// /ui/logs/entry returns the full record for a single entry by id.
+	// /ui/logs/entry returns the full record for a single entry, located by its
+	// index path (YYYY-MM/DD/<id>) and read directly from disk.
 	mux.HandleFunc("/ui/logs/entry", func(w http.ResponseWriter, r *http.Request) {
-		id := r.URL.Query().Get("id")
-		if id == "" {
-			http.Error(w, "missing id", http.StatusBadRequest)
+		path := r.URL.Query().Get("path")
+		if path == "" {
+			http.Error(w, "missing path", http.StatusBadRequest)
 			return
 		}
-		entry, err := logs.Get(id)
+		entry, err := logs.ReadEntry(path)
+		if errors.Is(err, logstore.ErrInvalidPath) {
+			http.Error(w, "invalid path", http.StatusBadRequest)
+			return
+		}
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
