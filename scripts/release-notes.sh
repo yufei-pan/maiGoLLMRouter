@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build full GitHub release notes (changelog + download table).
-# Usage: ./scripts/release-notes.sh 0.1.5 v0.1.4 > dist/RELEASE_NOTES.md
+# Usage: ./scripts/release-notes.sh 0.1.6 v0.1.5 > dist/RELEASE_NOTES.md
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
