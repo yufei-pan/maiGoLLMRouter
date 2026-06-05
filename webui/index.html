@@ -20,8 +20,15 @@
   header label { color: var(--muted); font-size: 13px; }
   input, button, select { background: var(--panel2); color: var(--text);
     border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 13px; }
-  button { cursor: pointer; }
+  button { cursor: pointer; user-select: none; -webkit-user-select: none; touch-action: none; }
   button:hover { border-color: var(--accent); }
+  /* #refresh glows while auto-refresh is on (toggled by holding the button). */
+  @keyframes refreshGlow {
+    0%, 100% { box-shadow: 0 0 5px rgba(110,168,254,.45); }
+    50%      { box-shadow: 0 0 13px rgba(110,168,254,.85); }
+  }
+  #refresh.glow { border-color: var(--accent); color: var(--accent);
+    animation: refreshGlow 1.6s ease-in-out infinite; }
   .wrap { padding: 16px 20px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
@@ -59,9 +66,7 @@
   <h1>maiGoLLMRouter</h1>
   <span class="muted" style="font-size:13px">request logs</span>
   <div class="spacer"></div>
-  <label>limit <input id="limit" type="number" value="100" min="1" style="width:80px" /></label>
-  <label><input id="auto" type="checkbox" /> auto-refresh</label>
-  <button id="refresh">Refresh</button>
+  <button id="refresh" title="Click to refresh now · hold to toggle auto-refresh">Refresh</button>
 </header>
 <div class="wrap">
   <table>
@@ -80,7 +85,14 @@
 const rowsEl = document.getElementById('rows');
 const emptyEl = document.getElementById('empty');
 let timer = null;
-const expanded = new Set(); // ids of rows whose detail is open
+let autoOn = false;                // auto-refresh state (toggled by holding Refresh)
+const expanded = new Set();        // paths of rows whose detail is open
+const rowsByPath = new Map();      // path -> { tr, dt } row elements
+let newestTime = null;             // server time of newest loaded entry (cursor)
+let oldestTime = null;             // server time of oldest loaded entry (cursor)
+let atEnd = false;                 // true once an older page returned < a full batch
+let loadingOlder = false;          // guards concurrent infinite-scroll loads
+const PAGE = 50;
 
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
@@ -185,30 +197,28 @@ function detailInner(e, entryKey) {
     <div class="attempts"><div class="card"><h3>Attempts (${(e.attempts||[]).length})</h3>${attempts}</div></div>`;
 }
 
-// detailCache holds full entry records keyed by id so an expanded row does not
-// re-fetch on every list refresh. Entries are append-only/immutable, so caching
-// by id is safe.
+// detailCache holds full entry records keyed by path so an expanded row does
+// not re-fetch on every refresh. Entries are append-only/immutable, so caching
+// by path is safe. Rows are never re-rendered once created, so nested <details>
+// and scroll positions inside a panel are preserved naturally.
 const detailCache = new Map();
 
-// fillDetail populates an expanded row's cell, fetching the full record once and
-// caching it. captured UI state (open nested <details>, scroll) is reapplied
-// after async fills so it survives a refresh.
-async function fillDetail(key, td, uiState) {
-  if (detailCache.has(key)) {
-    td.innerHTML = detailInner(detailCache.get(key), key);
-    if (uiState) applyUIState(uiState);
+// fillDetail populates an expanded row's cell, fetching the full record once
+// (by its index path) and caching it.
+async function fillDetail(path, td) {
+  if (detailCache.has(path)) {
+    td.innerHTML = detailInner(detailCache.get(path), path);
     return;
   }
   if (td.dataset.loading) return;
   td.dataset.loading = '1';
   td.innerHTML = '<div class="muted" style="padding:10px">Loading…</div>';
   try {
-    const res = await fetch('/ui/logs/entry?id=' + encodeURIComponent(key));
+    const res = await fetch('/ui/logs/entry?path=' + encodeURIComponent(path));
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const full = await res.json();
-    detailCache.set(key, full);
-    td.innerHTML = detailInner(full, key);
-    if (uiState) applyUIState(uiState);
+    detailCache.set(path, full);
+    td.innerHTML = detailInner(full, path);
   } catch (err) {
     td.innerHTML = '<div class="o-error" style="padding:10px">Failed to load detail: ' + esc(err) + '</div>';
   } finally {
@@ -216,94 +226,174 @@ async function fillDetail(key, td, uiState) {
   }
 }
 
-// captureUIState records, by stable key, which nested <details> are open and
-// the scroll offsets of each text box, so they survive a re-render.
-function captureUIState() {
-  const open = {}, scroll = {};
-  rowsEl.querySelectorAll('[data-detailkey]').forEach(el => {
-    if (el.open) open[el.dataset.detailkey] = true;
+function scroller() { return document.scrollingElement || document.documentElement; }
+function updateEmpty() { emptyEl.style.display = rowsByPath.size ? 'none' : 'block'; }
+
+// makeRow builds the list row plus its (hidden) detail row from one index entry.
+function makeRow(e) {
+  const path = e.path;
+  const tr = document.createElement('tr');
+  tr.className = 'row';
+  const ok = e.status >= 200 && e.status < 300;
+  const served = e.served_by ? esc(e.served_by) : '<span class="muted">—</span>';
+  tr.innerHTML = `
+    <td class="muted">${esc(fmtTime(e.time))}</td>
+    <td><span class="pill ${ok ? 'ok' : 'err'}">${esc(e.status)}</span></td>
+    <td>${esc(e.endpoint)}</td>
+    <td class="mono">${esc(e.inbound_model)}</td>
+    <td class="mono">${served}</td>
+    <td>${esc(e.attempts)}</td>
+    <td class="mono">${fmtTokens(e.in_tokens)}</td>
+    <td class="mono">${fmtTokens(e.out_tokens)}</td>
+    <td class="muted">${esc(e.latency_ms)} ms</td>`;
+  const dt = document.createElement('tr');
+  dt.className = 'detail';
+  const td = document.createElement('td');
+  td.colSpan = 9;
+  dt.appendChild(td);
+  dt.style.display = 'none';
+  tr.addEventListener('click', () => {
+    if (dt.style.display === 'none') {
+      dt.style.display = 'table-row';
+      expanded.add(path);
+      fillDetail(path, td);
+    } else {
+      dt.style.display = 'none';
+      expanded.delete(path);
+    }
   });
-  rowsEl.querySelectorAll('[data-scrollkey]').forEach(el => {
-    if (el.scrollTop || el.scrollLeft) scroll[el.dataset.scrollkey] = [el.scrollTop, el.scrollLeft];
-  });
-  return { open, scroll };
+  return { tr, dt };
 }
 
-function applyUIState(st) {
-  rowsEl.querySelectorAll('[data-detailkey]').forEach(el => {
-    if (st.open[el.dataset.detailkey]) el.open = true;
-  });
-  rowsEl.querySelectorAll('[data-scrollkey]').forEach(el => {
-    const s = st.scroll[el.dataset.scrollkey];
-    if (s) { el.scrollTop = s[0]; el.scrollLeft = s[1]; }
-  });
+// addEntries inserts a batch of index entries (server-ordered newest first),
+// skipping any already present, and advances the time cursors. `where` is
+// 'top' for newer entries (auto-refresh) or 'bottom' for older ones (initial
+// load and infinite scroll).
+function addEntries(list, where) {
+  const frag = document.createDocumentFragment();
+  let added = 0;
+  for (const e of list) {
+    if (!e.path || rowsByPath.has(e.path)) continue;
+    const r = makeRow(e);
+    rowsByPath.set(e.path, r);
+    frag.appendChild(r.tr);
+    frag.appendChild(r.dt);
+    added++;
+    if (newestTime == null || Date.parse(e.time) > Date.parse(newestTime)) newestTime = e.time;
+    if (oldestTime == null || Date.parse(e.time) < Date.parse(oldestTime)) oldestTime = e.time;
+  }
+  if (added) {
+    if (where === 'top') rowsEl.insertBefore(frag, rowsEl.firstChild);
+    else rowsEl.appendChild(frag);
+    updateEmpty();
+  }
+  return added;
 }
 
-function render(entries) {
-  const scrollY = window.scrollY;
-  const ui = captureUIState();
-  rowsEl.innerHTML = '';
-  emptyEl.style.display = entries.length ? 'none' : 'block';
-  entries.forEach((e, i) => {
-    const key = e.id || ('idx-' + i);
-    const tr = document.createElement('tr');
-    tr.className = 'row';
-    const cls = e.success ? 'ok' : 'err';
-    const served = e.provider ? `${esc(e.provider)}/${esc(e.model)}` : '<span class="muted">—</span>';
-    const u = usageFromEntry(e);
-    tr.innerHTML = `
-      <td class="muted">${esc(fmtTime(e.time))}</td>
-      <td><span class="pill ${cls}">${esc(e.status)}</span></td>
-      <td>${esc(e.endpoint)}</td>
-      <td class="mono">${esc(e.inbound_model)}</td>
-      <td class="mono">${served}</td>
-      <td>${esc(e.attempts_count)}</td>
-      <td class="mono">${fmtTokens(u.in)}</td>
-      <td class="mono">${fmtTokens(u.out)}</td>
-      <td class="muted">${esc(e.latency_ms)} ms</td>`;
-    const dt = document.createElement('tr');
-    dt.className = 'detail';
-    const td = document.createElement('td');
-    td.colSpan = 9;
-    dt.appendChild(td);
-    const isOpen = expanded.has(key);
-    dt.style.display = isOpen ? 'table-row' : 'none';
-    if (isOpen) fillDetail(key, td, ui);
-    tr.addEventListener('click', () => {
-      if (dt.style.display === 'none') {
-        dt.style.display = 'table-row';
-        expanded.add(key);
-        fillDetail(key, td);
-      } else {
-        dt.style.display = 'none';
-        expanded.delete(key);
-      }
-    });
-    rowsEl.appendChild(tr);
-    rowsEl.appendChild(dt);
-  });
-  applyUIState(ui);
-  window.scrollTo(0, scrollY);
-}
-
-async function load() {
-  const limit = document.getElementById('limit').value || 100;
+// loadInitial fetches the cached recent entries shown on first open.
+async function loadInitial() {
   try {
-    const res = await fetch('/ui/logs?limit=' + encodeURIComponent(limit));
+    const res = await fetch('/ui/logs');
     const data = await res.json();
-    render(data.entries || []);
+    addEntries(data.entries || [], 'bottom');
+    updateEmpty();
+    maybeLoadMore();
   } catch (err) {
     emptyEl.style.display = 'block';
     emptyEl.textContent = 'Failed to load logs: ' + err;
   }
 }
 
-document.getElementById('refresh').addEventListener('click', load);
-document.getElementById('auto').addEventListener('change', (e) => {
-  if (e.target.checked) timer = setInterval(load, 3000);
-  else clearInterval(timer);
+// refresh pulls entries newer than the newest one we hold and prepends them.
+// It keeps the user anchored: if they are at the very top, new rows appear and
+// stay at the top; otherwise the viewport is offset by the inserted height so
+// the row they are reading (e.g. an expanded log) does not jump.
+async function refresh() {
+  const url = newestTime ? '/ui/logs?since=' + encodeURIComponent(newestTime) : '/ui/logs';
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+    const list = data.entries || [];
+    if (!list.length) return;
+    const se = scroller();
+    const prevTop = se.scrollTop;
+    const prevHeight = se.scrollHeight;
+    const atTop = prevTop <= 4;
+    const added = addEntries(list, 'top');
+    if (!added) return;
+    se.scrollTop = atTop ? 0 : prevTop + (se.scrollHeight - prevHeight);
+  } catch (err) { /* transient; next tick retries */ }
+}
+
+// loadOlder fetches the next page of entries older than the oldest we hold and
+// appends them to the bottom (infinite scroll).
+async function loadOlder() {
+  if (loadingOlder || atEnd || !oldestTime) return;
+  loadingOlder = true;
+  try {
+    const res = await fetch('/ui/logs?before=' + encodeURIComponent(oldestTime) + '&limit=' + PAGE);
+    const data = await res.json();
+    const list = data.entries || [];
+    addEntries(list, 'bottom');
+    if (list.length < PAGE) atEnd = true;
+  } catch (err) { /* transient; another scroll retries */ }
+  finally {
+    loadingOlder = false;
+    maybeLoadMore();
+  }
+}
+
+// maybeLoadMore loads another older page when the bottom is in view. It also
+// keeps loading until the page is tall enough to scroll, so short content can
+// still be paged through.
+function maybeLoadMore() {
+  if (atEnd || loadingOlder) return;
+  const se = scroller();
+  if (se.scrollHeight - se.scrollTop - se.clientHeight < 300) loadOlder();
+}
+
+window.addEventListener('scroll', maybeLoadMore, { passive: true });
+
+// setAuto turns the auto-refresh interval on or off and reflects the state with
+// a glowing Refresh button.
+function setAuto(on) {
+  autoOn = on;
+  refreshBtn.classList.toggle('glow', on);
+  refreshBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  if (timer) { clearInterval(timer); timer = null; }
+  if (on) timer = setInterval(refresh, 3000);
+}
+
+// The single Refresh button is both an action and a toggle: a short click
+// refreshes now, while a press-and-hold flips auto-refresh on/off. A hold timer
+// distinguishes the two so a hold does not also fire an immediate refresh.
+const refreshBtn = document.getElementById('refresh');
+const HOLD_MS = 450;
+let holdTimer = null;
+let held = false;
+
+refreshBtn.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  held = false;
+  try { refreshBtn.setPointerCapture(e.pointerId); } catch (_) {}
+  holdTimer = setTimeout(() => {
+    held = true;
+    holdTimer = null;
+    setAuto(!autoOn);
+  }, HOLD_MS);
 });
-load();
+function cancelHold() {
+  if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+}
+refreshBtn.addEventListener('pointerup', () => {
+  cancelHold();
+  if (!held) refresh(); // short press => refresh immediately
+});
+refreshBtn.addEventListener('pointercancel', cancelHold);
+refreshBtn.addEventListener('contextmenu', (e) => e.preventDefault()); // no menu on long-press
+
+loadInitial();
+setAuto(true); // auto-refresh on by default
 </script>
 </body>
 </html>

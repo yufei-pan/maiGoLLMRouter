@@ -1,6 +1,7 @@
 // Command maiGoLLMRouter is a lightweight OpenAI-compatible API router that
 // translates requests to OpenAI/Anthropic/Gemini providers with multi-key
-// selection, fallbacks, blackout, output verification, and JSONL logging.
+// selection, fallbacks, blackout, output verification, and per-request logging
+// (a compact TSV index plus one JSON file per request).
 package main
 
 import (
@@ -71,6 +72,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("logstore: %v", err)
 	}
+	startLogCleanup(logs, cfg.Server.LogRetention)
 
 	rt := router.New(cfg)
 	srv := server.New(cfg, rt, logs)
@@ -89,6 +91,26 @@ func main() {
 	if err := httpServer.ListenAndServe(); err != nil {
 		log.Fatalf("server: %v", err)
 	}
+}
+
+// startLogCleanup runs an initial retention sweep and then a daily one in the
+// background. A non-positive retention disables cleanup.
+func startLogCleanup(logs *logstore.Store, retention time.Duration) {
+	if retention <= 0 {
+		return
+	}
+	if err := logs.Cleanup(retention); err != nil {
+		log.Printf("log cleanup: %v", err)
+	}
+	go func() {
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			if err := logs.Cleanup(retention); err != nil {
+				log.Printf("log cleanup: %v", err)
+			}
+		}
+	}()
 }
 
 // logStartup reports the inbound endpoint, API type, key sources, and config
@@ -130,6 +152,11 @@ func logStartup(cfg *config.Config, configPath string) {
 	log.Printf("providers: %d, %d provider API key(s) read from config file", len(cfg.Providers), totalKeys)
 	for _, pt := range parts {
 		log.Printf("    - %s", pt)
+	}
+	if cfg.Server.LogRetention > 0 {
+		log.Printf("log retention: %d day(s) (detail files in %s)", int(cfg.Server.LogRetention.Hours()/24), cfg.Server.LogDir)
+	} else {
+		log.Printf("log retention: disabled (detail files kept indefinitely)")
 	}
 	log.Printf("models: %d", len(cfg.Models))
 	if len(cfg.FallbackProviders) > 0 {

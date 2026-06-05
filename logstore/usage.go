@@ -8,6 +8,37 @@ type attemptUsageView struct {
 	Response string `json:"response,omitempty"`
 }
 
+// attemptsCount returns the number of attempts recorded on an entry without
+// decoding their (potentially large) payloads.
+func attemptsCount(attempts any) int {
+	if attempts == nil {
+		return 0
+	}
+	raw, err := json.Marshal(attempts)
+	if err != nil {
+		return 0
+	}
+	var arr []json.RawMessage
+	if err := json.Unmarshal(raw, &arr); err != nil {
+		return 0
+	}
+	return len(arr)
+}
+
+// usageForEntry computes prompt/completion token counts for an entry's index
+// row, reusing computeUsage. Attempts are re-marshaled to raw JSON so the same
+// logic applies whether they arrive as []router.Attempt (write time) or decoded
+// JSON (tests).
+func usageForEntry(e Entry) (prompt, completion int, ok bool) {
+	var attempts []json.RawMessage
+	if e.Attempts != nil {
+		if raw, err := json.Marshal(e.Attempts); err == nil {
+			_ = json.Unmarshal(raw, &attempts)
+		}
+	}
+	return computeUsage(e.Success, e.Response, attempts)
+}
+
 func parseUsageFromBody(raw []byte) (prompt, completion int, ok bool) {
 	if len(raw) == 0 {
 		return 0, 0, false
