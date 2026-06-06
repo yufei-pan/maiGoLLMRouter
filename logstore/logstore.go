@@ -127,16 +127,27 @@ func (s *Store) ensureHeader() error {
 }
 
 // warmCache loads up to cacheMax of the most recent index entries into memory.
+// It streams the index through a fixed ring so the whole (potentially large)
+// file is never held in memory at once.
 func (s *Store) warmCache() error {
-	all, err := s.readAll()
+	f, err := os.Open(s.tsvPath)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
 		return err
 	}
-	if len(all) > cacheMax {
-		all = all[len(all)-cacheMax:]
+	defer f.Close()
+
+	ring := newLastN(cacheMax)
+	if err := forEachIndexLine(f, func(e IndexEntry) bool {
+		ring.add(e)
+		return true
+	}); err != nil {
+		return err
 	}
 	s.mu.Lock()
-	s.cache = all
+	s.cache = ring.slice()
 	s.mu.Unlock()
 	return nil
 }
@@ -405,7 +416,9 @@ func (s *Store) removeOldDayDirs(cutoffDay time.Time) error {
 }
 
 // pruneIndex rewrites index.tsv keeping only rows on or after cutoffDay, then
-// refreshes the in-memory cache from the kept rows.
+// refreshes the in-memory cache. Kept rows are written straight to a temp file
+// as they are scanned and the cache is rebuilt from a fixed ring, so peak
+// memory stays bounded even for a very large index.
 func (s *Store) pruneIndex(cutoffDay time.Time) error {
 	f, err := os.Open(s.tsvPath)
 	if err != nil {
@@ -414,50 +427,60 @@ func (s *Store) pruneIndex(cutoffDay time.Time) error {
 		}
 		return err
 	}
-	var kept []IndexEntry
-	dropped := 0
-	err = forEachIndexLine(f, func(e IndexEntry) bool {
-		if parseEntryTime(e.Time).Before(cutoffDay) {
-			dropped++
-			return true
-		}
-		kept = append(kept, e)
-		return true
-	})
-	f.Close()
-	if err != nil {
-		return err
-	}
-	if dropped == 0 {
-		return nil // nothing to rewrite
-	}
+	defer f.Close()
 
 	tmp := s.tsvPath + ".tmp"
 	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 	if err != nil {
 		return err
 	}
-	if _, err := out.WriteString(indexHeader); err != nil {
-		out.Close()
+	bw := bufio.NewWriter(out)
+
+	cleanup := func() { out.Close(); os.Remove(tmp) }
+	if _, err := bw.WriteString(indexHeader); err != nil {
+		cleanup()
 		return err
 	}
-	for _, e := range kept {
-		if _, err := out.WriteString(formatIndexLine(e)); err != nil {
-			out.Close()
-			return err
+
+	ring := newLastN(cacheMax)
+	dropped := 0
+	var writeErr error
+	scanErr := forEachIndexLine(f, func(e IndexEntry) bool {
+		if parseEntryTime(e.Time).Before(cutoffDay) {
+			dropped++
+			return true
 		}
+		if _, writeErr = bw.WriteString(formatIndexLine(e)); writeErr != nil {
+			return false
+		}
+		ring.add(e)
+		return true
+	})
+	if scanErr != nil {
+		cleanup()
+		return scanErr
+	}
+	if writeErr != nil {
+		cleanup()
+		return writeErr
+	}
+	if err := bw.Flush(); err != nil {
+		cleanup()
+		return err
 	}
 	if err := out.Close(); err != nil {
+		os.Remove(tmp)
 		return err
+	}
+
+	if dropped == 0 {
+		os.Remove(tmp) // nothing changed; keep the original
+		return nil
 	}
 	if err := os.Rename(tmp, s.tsvPath); err != nil {
 		return err
 	}
-
-	if len(kept) > cacheMax {
-		kept = kept[len(kept)-cacheMax:]
-	}
-	s.cache = kept
+	s.cache = ring.slice()
 	return nil
 }
 
@@ -680,6 +703,36 @@ func parseTime(s string) (time.Time, error) {
 		return time.Time{}, err
 	}
 	return t.UTC(), nil
+}
+
+// lastN keeps at most n of the most recently added entries, in insertion
+// order, using a fixed-size circular buffer so memory stays bounded regardless
+// of how many entries are fed through it.
+type lastN struct {
+	buf   []IndexEntry
+	total int
+}
+
+func newLastN(n int) *lastN { return &lastN{buf: make([]IndexEntry, n)} }
+
+func (l *lastN) add(e IndexEntry) {
+	l.buf[l.total%len(l.buf)] = e
+	l.total++
+}
+
+// slice returns the retained entries in chronological (insertion) order.
+func (l *lastN) slice() []IndexEntry {
+	n := len(l.buf)
+	if l.total <= n {
+		out := make([]IndexEntry, l.total)
+		copy(out, l.buf[:l.total])
+		return out
+	}
+	out := make([]IndexEntry, n)
+	start := l.total % n
+	copy(out, l.buf[start:])
+	copy(out[n-start:], l.buf[:start])
+	return out
 }
 
 func reversed(in []IndexEntry) []IndexEntry {
