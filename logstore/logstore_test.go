@@ -74,8 +74,8 @@ func TestWriteCreatesJSONFileAndIndex(t *testing.T) {
 		t.Errorf("first line should be the comment header, got %q", lines[0])
 	}
 	cols := strings.Split(lines[1], "\t")
-	if len(cols) != 10 {
-		t.Fatalf("want 10 TSV columns, got %d: %q", len(cols), cols)
+	if len(cols) != 11 {
+		t.Fatalf("want 11 TSV columns, got %d: %q", len(cols), cols)
 	}
 	if cols[0] != "2026-06/04/req-0000" {
 		t.Errorf("col0 path = %q", cols[0])
