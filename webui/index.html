@@ -73,7 +73,7 @@
     <thead>
       <tr>
         <th>Time</th><th>Status</th><th>Endpoint</th><th>Inbound model</th>
-        <th>Served by</th><th>Attempts</th><th>In tokens</th><th>Out tokens</th><th>Latency</th>
+        <th>Served by</th><th>Attempts</th><th>In tokens</th><th>Out tokens</th><th>Finish</th><th>Latency</th>
       </tr>
     </thead>
     <tbody id="rows"></tbody>
@@ -165,13 +165,20 @@ function fmtTokens(n) {
   return n == null ? '<span class="muted">—</span>' : esc(String(n));
 }
 
+// fmtLatency renders a millisecond latency as seconds (e.g. "1.23 s").
+function fmtLatency(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n)) return '<span class="muted">—</span>';
+  return esc((n / 1000).toFixed(2)) + ' s';
+}
+
 function attemptRow(a, entryKey, idx) {
   const head = `<div class="attempt">
     <span><span class="k">prov</span> ${esc(a.provider)}/${esc(a.model)}</span>
     <span><span class="k">key</span> <span class="mono">${esc(a.key)}</span> <span class="badge">${esc(a.key_type)}</span></span>
     <span><span class="k">http</span> ${esc(a.http_status)}</span>
     <span><span class="k">finish</span> ${esc(a.finish_reason || '-')}</span>
-    <span><span class="k">ms</span> ${esc(a.latency_ms)}</span>
+    <span><span class="k">latency</span> ${fmtLatency(a.latency_ms)}</span>
     <span class="o-${esc(a.outcome)}">${esc(a.outcome)}</span>
   </div>`;
   const err = a.error ? `<div class="muted mono" style="margin:-2px 0 6px;font-size:11px">${esc(a.error)}</div>` : '';
@@ -245,11 +252,12 @@ function makeRow(e) {
     <td>${esc(e.attempts)}</td>
     <td class="mono">${fmtTokens(e.in_tokens)}</td>
     <td class="mono">${fmtTokens(e.out_tokens)}</td>
-    <td class="muted">${esc(e.latency_ms)} ms</td>`;
+    <td class="mono">${e.finish_reason ? esc(e.finish_reason) : '<span class="muted">—</span>'}</td>
+    <td class="muted">${fmtLatency(e.latency_ms)}</td>`;
   const dt = document.createElement('tr');
   dt.className = 'detail';
   const td = document.createElement('td');
-  td.colSpan = 9;
+  td.colSpan = 10;
   dt.appendChild(td);
   dt.style.display = 'none';
   tr.addEventListener('click', () => {

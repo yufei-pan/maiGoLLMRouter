@@ -39,6 +39,35 @@ func usageForEntry(e Entry) (prompt, completion int, ok bool) {
 	return computeUsage(e.Success, e.Response, attempts)
 }
 
+// finishReasonForEntry returns the finish reason to surface on the index row.
+// For a successful entry it is the finish reason of the successful attempt;
+// otherwise it is the last non-empty finish reason recorded across attempts.
+func finishReasonForEntry(e Entry) string {
+	var attempts []json.RawMessage
+	if e.Attempts != nil {
+		if raw, err := json.Marshal(e.Attempts); err == nil {
+			_ = json.Unmarshal(raw, &attempts)
+		}
+	}
+	last := ""
+	for _, raw := range attempts {
+		var att struct {
+			Outcome      string `json:"outcome"`
+			FinishReason string `json:"finish_reason"`
+		}
+		if err := json.Unmarshal(raw, &att); err != nil {
+			continue
+		}
+		if att.Outcome == "success" && att.FinishReason != "" {
+			return att.FinishReason
+		}
+		if att.FinishReason != "" {
+			last = att.FinishReason
+		}
+	}
+	return last
+}
+
 func parseUsageFromBody(raw []byte) (prompt, completion int, ok bool) {
 	if len(raw) == 0 {
 		return 0, 0, false
