@@ -7,7 +7,7 @@
 <style>
   :root {
     --bg: #0f1115; --panel: #171a21; --panel2: #1e222b; --border: #2a2f3a;
-    --text: #e6e9ef; --muted: #8a93a6; --accent: #6ea8fe; --ok: #3fb950; --err: #f85149;
+    --text: #e6e9ef; --muted: #8a93a6; --accent: #6ea8fe; --ok: #3fb950; --err: #f85149; --warn: #d29922;
     --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
   * { box-sizing: border-box; }
@@ -55,6 +55,7 @@
   .badge { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--panel2); border: 1px solid var(--border); }
   .o-success { color: var(--ok); } .o-bad_output, .o-provider_error, .o-error { color: var(--err); }
   .o-skipped_blackout, .o-canceled { color: var(--muted); }
+  .o-prohibited_content { color: var(--warn); }
   .attempt-resp { margin: -2px 0 8px; }
   .attempt-resp > summary { cursor: pointer; color: var(--err); font-size: 11px; user-select: none; }
   .attempt-resp > summary:hover { color: var(--accent); }
@@ -107,7 +108,7 @@ function pretty(v) {
 
 function failedAttemptOutcome(outcome) {
   return outcome === 'bad_output' || outcome === 'provider_error' ||
-    outcome === 'error' || outcome === 'canceled';
+    outcome === 'error' || outcome === 'canceled' || outcome === 'prohibited_content';
 }
 
 function parseUsageBody(body) {

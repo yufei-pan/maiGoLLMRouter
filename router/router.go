@@ -68,7 +68,8 @@ const (
 	outcomeSuccess outcome = iota
 	outcomeBadOutput
 	outcomeProviderError
-	outcomeCanceled // inbound request context canceled (caller went away)
+	outcomeCanceled   // inbound request context canceled (caller went away)
+	outcomeProhibited // downstream blocked the content (deterministic policy decision)
 )
 
 // Resolve maps an inbound model name to an ordered list of targets (#12,#14,#15).
@@ -128,6 +129,11 @@ func (r *Router) Execute(ctx context.Context, op provider.Operation, inboundMode
 
 	var last *provider.Response
 
+	// prohibited tracks provider/model combos that returned a content-policy
+	// block. Such a result is deterministic for the combo regardless of key, so
+	// the remaining keys (and the fallback-key phase) for that combo are skipped.
+	prohibited := make(map[string]bool)
+
 	// Phase 1: normal keys, randomized order, with blackout on failure.
 	for _, t := range targets {
 		p := r.cfg.Providers[t.Provider]
@@ -146,8 +152,13 @@ func (r *Router) Execute(ctx context.Context, op provider.Operation, inboundMode
 				})
 				continue
 			}
-			if r.tryKey(ctx, res, p, t.Model, op, body, key, "normal", &last) {
+			done, skip := r.tryKey(ctx, res, p, t.Model, op, body, key, "normal", &last)
+			if done {
 				return res
+			}
+			if skip {
+				prohibited[targetKey(t)] = true
+				break
 			}
 		}
 	}
@@ -159,9 +170,17 @@ func (r *Router) Execute(ctx context.Context, op provider.Operation, inboundMode
 		if p == nil || !p.FallbackAllows(t.Model) {
 			continue
 		}
+		if prohibited[targetKey(t)] {
+			continue
+		}
 		for _, key := range p.FallbackKeySet() {
-			if r.tryKey(ctx, res, p, t.Model, op, body, key, "fallback", &last) {
+			done, skip := r.tryKey(ctx, res, p, t.Model, op, body, key, "fallback", &last)
+			if done {
 				return res
+			}
+			if skip {
+				prohibited[targetKey(t)] = true
+				break
 			}
 		}
 	}
@@ -181,8 +200,12 @@ func (r *Router) Execute(ctx context.Context, op provider.Operation, inboundMode
 }
 
 // tryKey performs up to 1+maxRetries calls on a single key, retrying only on
-// bad output. It returns true when the request succeeds (res is populated).
-func (r *Router) tryKey(ctx context.Context, res *Result, p *config.Provider, model string, op provider.Operation, body map[string]any, key, keyType string, last **provider.Response) bool {
+// bad output. The done return is true when the request finishes the whole
+// routing run (res is populated): success or caller cancellation. The skip
+// return is true when the provider/model combo returned a content-policy block,
+// signaling the caller to skip the combo's remaining keys and advance to the
+// next target/fallback without blacking out the key.
+func (r *Router) tryKey(ctx context.Context, res *Result, p *config.Provider, model string, op provider.Operation, body map[string]any, key, keyType string, last **provider.Response) (done, skip bool) {
 	retries := r.cfg.Server.MaxRetries
 	for i := 0; ; i++ {
 		resp, att, oc := r.callOnce(ctx, p, model, op, body, key, keyType)
@@ -197,20 +220,25 @@ func (r *Router) tryKey(ctx context.Context, res *Result, p *config.Provider, mo
 			res.Body = resp.OpenAIBody
 			res.Provider = p.Name
 			res.Model = model
-			return true
+			return true, false
 		case outcomeCanceled:
 			// Caller went away: stop the whole routing run without blackout.
 			res.Status = 499 // "Client Closed Request" (nginx convention)
 			res.Body = errorBody("request canceled by caller", "request_canceled")
-			return true
+			return true, false
+		case outcomeProhibited:
+			// Deterministic content-policy block: retrying with other keys for
+			// this combo is futile and not a provider/key fault, so skip the
+			// combo without blacking out the key.
+			return false, true
 		case outcomeProviderError:
 			if keyType == "normal" {
 				r.blackout.Fail(key, model)
 			}
-			return false
+			return false, false
 		case outcomeBadOutput:
 			if i >= retries {
-				return false
+				return false, false
 			}
 			// retry the same key without blackout
 		}
@@ -237,6 +265,16 @@ func (r *Router) callOnce(ctx context.Context, p *config.Provider, model string,
 		att.Outcome = "canceled"
 		att.Error = ctx.Err().Error()
 		return resp, att, outcomeCanceled
+	}
+
+	// A content-policy block is a deterministic output, even when delivered with
+	// an HTTP 200. Treat it as such before the error/output checks so it is not
+	// mistaken for a provider error (no blackout) or retriable bad output.
+	if resp != nil && resp.Prohibited {
+		att.Outcome = "prohibited_content"
+		att.Error = "content blocked by provider policy (" + provider.ProhibitedContentMarker + ")"
+		att.Response = string(resp.RawResponse)
+		return resp, att, outcomeProhibited
 	}
 
 	if err != nil || resp == nil || !resp.OK() {
@@ -311,6 +349,12 @@ func orderedProviders(names []string, selection string) []string {
 		rand.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
 	}
 	return out
+}
+
+// targetKey identifies a provider/model combo for the prohibited-combo set. The
+// NUL separator cannot appear in provider names or models, so it is unambiguous.
+func targetKey(t config.Target) string {
+	return t.Provider + "\x00" + t.Model
 }
 
 func maskKey(key string) string {

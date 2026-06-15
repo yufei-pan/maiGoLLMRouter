@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
 
 // Operation distinguishes the two supported request kinds.
@@ -34,6 +35,7 @@ type Response struct {
 	OpenAIBody   []byte // response translated into OpenAI JSON
 	FinishReason string // normalized finish reason (chat only): stop, length, ...
 	HasContent   bool   // whether the response carried non-empty content
+	Prohibited   bool   // downstream blocked the request for content-policy reasons
 	OutboundURL  string // downstream URL hit (for logging)
 	OutboundBody []byte // outbound request body sent downstream (for logging)
 	RawResponse  []byte // raw downstream response body (for logging)
@@ -49,16 +51,76 @@ func (r *Response) OK() bool {
 // transport-level failure (no usable HTTP response); HTTP error statuses are
 // reported via Response.HTTPStatus with a nil error.
 func Call(ctx context.Context, client *http.Client, kind, baseURL, apiKey string, req Request) (*Response, error) {
+	var resp *Response
+	var err error
 	switch kind {
 	case "openai":
-		return callOpenAI(ctx, client, baseURL, apiKey, req)
+		resp, err = callOpenAI(ctx, client, baseURL, apiKey, req)
 	case "gemini":
-		return callGemini(ctx, client, baseURL, apiKey, req)
+		resp, err = callGemini(ctx, client, baseURL, apiKey, req)
 	case "anthropic":
-		return callAnthropic(ctx, client, baseURL, apiKey, req)
+		resp, err = callAnthropic(ctx, client, baseURL, apiKey, req)
 	default:
 		return nil, fmt.Errorf("unknown provider kind %q", kind)
 	}
+	if resp != nil && isProhibitedContent(resp.RawResponse) {
+		resp.Prohibited = true
+	}
+	return resp, err
+}
+
+// ProhibitedContentMarker is the sentinel a downstream emits when it refuses a
+// request for content-policy reasons. It may arrive with an HTTP 200 status.
+const ProhibitedContentMarker = "PROHIBITED_CONTENT"
+
+// isProhibitedContent reports whether a raw downstream body signals that the
+// request was blocked for content-policy reasons — for example
+// {"error":{"message":"PROHIBITED_CONTENT","code":403}} (even with HTTP 200),
+// OpenAI-style choices[].finish_reason, or a Gemini candidate/prompt-feedback
+// block. Such a response is a deterministic
+// policy decision, not a provider or key fault, so retrying the same
+// provider/model with other keys would only reproduce it.
+func isProhibitedContent(raw []byte) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var parsed struct {
+		Error struct {
+			Message string `json:"message"`
+			Status  string `json:"status"`
+		} `json:"error"`
+		PromptFeedback struct {
+			BlockReason string `json:"blockReason"`
+		} `json:"promptFeedback"`
+		Candidates []struct {
+			FinishReason string `json:"finishReason"`
+		} `json:"candidates"`
+		Choices []struct {
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	// Ignore the error: a partial decode still populates the fields we check, and
+	// a fully invalid body leaves them empty (reported as not-prohibited).
+	_ = json.Unmarshal(raw, &parsed)
+	if matchesProhibited(parsed.Error.Message) || matchesProhibited(parsed.Error.Status) ||
+		matchesProhibited(parsed.PromptFeedback.BlockReason) {
+		return true
+	}
+	for _, c := range parsed.Candidates {
+		if matchesProhibited(c.FinishReason) {
+			return true
+		}
+	}
+	for _, c := range parsed.Choices {
+		if matchesProhibited(c.FinishReason) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesProhibited(s string) bool {
+	return strings.EqualFold(strings.TrimSpace(s), ProhibitedContentMarker)
 }
 
 // doJSON sends a JSON request and returns the status and raw body.

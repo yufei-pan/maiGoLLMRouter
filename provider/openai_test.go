@@ -53,3 +53,29 @@ func TestCallOpenAIStripsStreamingControls(t *testing.T) {
 		t.Fatalf("temperature passthrough = %v, want 0.5", outbound["temperature"])
 	}
 }
+
+func TestIsProhibitedContent(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"openai-error-message", `{"error":{"message":"PROHIBITED_CONTENT","code":403}}`, true},
+		{"case-insensitive", `{"error":{"message":"prohibited_content"}}`, true},
+		{"gemini-finish-reason", `{"candidates":[{"finishReason":"PROHIBITED_CONTENT"}]}`, true},
+		{"gemini-prompt-feedback", `{"promptFeedback":{"blockReason":"PROHIBITED_CONTENT"}}`, true},
+		{"error-status", `{"error":{"status":"PROHIBITED_CONTENT"}}`, true},
+		{"openai-finish-reason", `{"choices":[{"finish_reason":"PROHIBITED_CONTENT","message":{"content":""}}]}`, true},
+		{"normal-response", `{"choices":[{"finish_reason":"stop","message":{"content":"hi"}}]}`, false},
+		{"other-error", `{"error":{"message":"rate limit exceeded","code":429}}`, false},
+		{"empty", ``, false},
+		{"invalid-json", `not json`, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isProhibitedContent([]byte(c.body)); got != c.want {
+				t.Errorf("isProhibitedContent(%s) = %v, want %v", c.body, got, c.want)
+			}
+		})
+	}
+}

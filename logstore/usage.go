@@ -117,7 +117,7 @@ func parseUsageFromBody(raw []byte) (prompt, completion int, ok bool) {
 
 func isFailedAttemptOutcome(outcome string) bool {
 	switch outcome {
-	case "bad_output", "provider_error", "error", "canceled":
+	case "bad_output", "provider_error", "error", "canceled", "prohibited_content":
 		return true
 	default:
 		return false

@@ -503,6 +503,101 @@ fallback_providers = ["a", "b"]
 	}
 }
 
+// prohibitedBody mimics a downstream that blocks content and returns it with an
+// HTTP 200, the case the router must treat as a deterministic policy decision.
+const prohibitedBody = `{"error":{"message":"PROHIBITED_CONTENT","code":403}}`
+
+func TestProhibitedContentSkipsKeysAndFallbackWithoutBlackout(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		fmt.Fprint(w, prohibitedBody) // HTTP 200 with a content-policy block
+	}))
+	defer srv.Close()
+
+	cfg := loadCfg(t, fmt.Sprintf(`
+[server]
+max_retries = 2
+
+[[provider]]
+name = "openai"
+kind = "openai"
+base_url = %q
+keys = ["n1","n2"]
+fallback_keys = ["f1"]
+
+[model."m"]
+targets = ["openai/real-model"]
+`, srv.URL))
+
+	r := New(cfg)
+	res := r.Execute(context.Background(), provider.OpChat, "m", chatReq())
+	if res.Success {
+		t.Fatal("expected non-success for prohibited content")
+	}
+	// Exactly one downstream call: no retries, no other normal key, no fallback key.
+	if calls != 1 {
+		t.Errorf("calls = %d, want 1 (no retries, no other keys, no fallback)", calls)
+	}
+	if len(res.Attempts) != 1 || res.Attempts[0].Outcome != "prohibited_content" {
+		t.Fatalf("unexpected attempts: %+v", res.Attempts)
+	}
+	// The block is not a provider/key fault, so nothing is blacked out.
+	if r.blackout.Blocked("n1", "real-model") || r.blackout.Blocked("n2", "real-model") {
+		t.Errorf("prohibited content must not black out normal keys")
+	}
+	// The downstream error body is returned to the caller.
+	if !strings.Contains(string(res.Body), "PROHIBITED_CONTENT") {
+		t.Errorf("expected prohibited body returned, got %s", res.Body)
+	}
+}
+
+func TestProhibitedContentAdvancesToNextTarget(t *testing.T) {
+	var blockCalls, okCalls int
+	blockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		blockCalls++
+		fmt.Fprint(w, prohibitedBody)
+	}))
+	defer blockSrv.Close()
+	okSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		okCalls++
+		fmt.Fprint(w, chatStop)
+	}))
+	defer okSrv.Close()
+
+	cfg := loadCfg(t, fmt.Sprintf(`
+[[provider]]
+name = "blocker"
+kind = "openai"
+base_url = %q
+keys = ["b1","b2"]
+
+[[provider]]
+name = "good"
+kind = "openai"
+base_url = %q
+keys = ["g1"]
+
+[model."m"]
+targets = ["blocker/real-model", "good/real-model"]
+`, blockSrv.URL, okSrv.URL))
+
+	res := New(cfg).Execute(context.Background(), provider.OpChat, "m", chatReq())
+	if !res.Success {
+		t.Fatalf("expected success via next target, attempts=%+v", res.Attempts)
+	}
+	if res.Provider != "good" {
+		t.Errorf("served by %q, want good", res.Provider)
+	}
+	// The blocked combo is tried once, then skipped entirely (no second key).
+	if blockCalls != 1 {
+		t.Errorf("blocker calls = %d, want 1", blockCalls)
+	}
+	if okCalls != 1 {
+		t.Errorf("good calls = %d, want 1", okCalls)
+	}
+}
+
 func TestResolveSequentialPreservesOrder(t *testing.T) {
 	cfg := loadCfg(t, `
 [[provider]]
