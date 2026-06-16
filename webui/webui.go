@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"maiGoLLMRouter/inflight"
 	"maiGoLLMRouter/logstore"
 )
 
@@ -15,7 +16,7 @@ import (
 var indexHTML []byte
 
 // Register attaches the web UI routes to the mux.
-func Register(mux *http.ServeMux, logs *logstore.Store) {
+func Register(mux *http.ServeMux, logs *logstore.Store, active *inflight.Registry) {
 	mux.HandleFunc("/ui", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(indexHTML)
@@ -90,5 +91,23 @@ func Register(mux *http.ServeMux, logs *logstore.Store) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(entry)
+	})
+	mux.HandleFunc("/ui/inflight", func(w http.ResponseWriter, r *http.Request) {
+		var requests []inflight.Entry
+		var serverTime string
+		if active != nil {
+			requests = active.Snapshot()
+			serverTime = active.ServerTime()
+		} else if logs != nil {
+			serverTime = logs.ServerTime()
+		}
+		if requests == nil {
+			requests = []inflight.Entry{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"requests":    requests,
+			"server_time": serverTime,
+		})
 	})
 }

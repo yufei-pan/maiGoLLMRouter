@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"maiGoLLMRouter/config"
+	"maiGoLLMRouter/inflight"
 	"maiGoLLMRouter/logstore"
 	"maiGoLLMRouter/provider"
 	"maiGoLLMRouter/router"
@@ -21,16 +22,17 @@ type Server struct {
 	cfg        *config.Config
 	rt         *router.Router
 	logs       *logstore.Store
+	inflight   *inflight.Registry
 	clientKeys map[string]bool
 }
 
 // New creates a Server.
-func New(cfg *config.Config, rt *router.Router, logs *logstore.Store) *Server {
+func New(cfg *config.Config, rt *router.Router, logs *logstore.Store, active *inflight.Registry) *Server {
 	keys := make(map[string]bool, len(cfg.Server.ClientKeys))
 	for _, k := range cfg.Server.ClientKeys {
 		keys[k] = true
 	}
-	return &Server{cfg: cfg, rt: rt, logs: logs, clientKeys: keys}
+	return &Server{cfg: cfg, rt: rt, logs: logs, inflight: active, clientKeys: keys}
 }
 
 // Register attaches the API routes to the mux.
@@ -143,14 +145,30 @@ func (s *Server) handle(op provider.Operation) http.HandlerFunc {
 		}
 
 		start := time.Now()
-		res := s.rt.Execute(r.Context(), op, model, body)
+		var live *inflight.Entry
+		reqID := "req-" + randomID()
+		if s.inflight != nil {
+			live = s.inflight.Register(inflight.Meta{
+				ID:           reqID,
+				StartedAt:    start.UTC().Format(time.RFC3339Nano),
+				Endpoint:     endpoint,
+				InboundModel: model,
+				ClientKey:    maskKey(clientKey),
+			})
+			defer s.inflight.Unregister(reqID)
+		}
+		ctx := r.Context()
+		if live != nil {
+			ctx = router.WithAttemptObserver(ctx, live)
+		}
+		res := s.rt.Execute(ctx, op, model, body)
 		latency := time.Since(start).Milliseconds()
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(res.Status)
 		_, _ = w.Write(res.Body)
 
-		s.log(endpoint, clientKey, model, latency, raw, res)
+		s.log(reqID, endpoint, clientKey, model, latency, raw, res)
 	}
 }
 
@@ -170,13 +188,13 @@ func (s *Server) authorize(r *http.Request) (string, bool) {
 	return token, true
 }
 
-func (s *Server) log(endpoint, clientKey, model string, latency int64, reqBody []byte, res *router.Result) {
+func (s *Server) log(id, endpoint, clientKey, model string, latency int64, reqBody []byte, res *router.Result) {
 	if s.logs == nil {
 		return
 	}
 	entry := logstore.Entry{
 		Time:         time.Now().UTC().Format(time.RFC3339Nano),
-		ID:           "req-" + randomID(),
+		ID:           id,
 		ClientKey:    maskKey(clientKey),
 		Endpoint:     endpoint,
 		InboundModel: model,

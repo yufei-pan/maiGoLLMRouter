@@ -138,18 +138,22 @@ func (r *Router) Execute(ctx context.Context, op provider.Operation, inboundMode
 	for _, t := range targets {
 		p := r.cfg.Providers[t.Provider]
 		if p == nil {
-			res.Attempts = append(res.Attempts, Attempt{
+			att := Attempt{
 				Provider: t.Provider, Model: t.Model, Outcome: "error",
 				Error: "provider not defined",
-			})
+			}
+			res.Attempts = append(res.Attempts, att)
+			notifyAttempt(ctx, att)
 			continue
 		}
 		for _, key := range shuffledKeys(p.Keys) {
 			if r.blackout.Blocked(key, t.Model) {
-				res.Attempts = append(res.Attempts, Attempt{
+				att := Attempt{
 					Provider: p.Name, Model: t.Model, Key: maskKey(key),
 					KeyType: "normal", Outcome: "skipped_blackout",
-				})
+				}
+				res.Attempts = append(res.Attempts, att)
+				notifyAttempt(ctx, att)
 				continue
 			}
 			done, skip := r.tryKey(ctx, res, p, t.Model, op, body, key, "normal", &last)
@@ -210,6 +214,7 @@ func (r *Router) tryKey(ctx context.Context, res *Result, p *config.Provider, mo
 	for i := 0; ; i++ {
 		resp, att, oc := r.callOnce(ctx, p, model, op, body, key, keyType)
 		res.Attempts = append(res.Attempts, att)
+		notifyAttempt(ctx, att)
 		if resp != nil {
 			*last = resp
 		}

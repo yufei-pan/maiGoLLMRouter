@@ -38,6 +38,9 @@
   .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
   .pill.ok { background: rgba(63,185,80,.15); color: var(--ok); }
   .pill.err { background: rgba(248,81,73,.15); color: var(--err); }
+  .pill.active { background: rgba(110,168,254,.15); color: var(--accent); }
+  tr.inflight { background: rgba(110,168,254,.04); }
+  tr.inflight:hover { background: rgba(110,168,254,.08); }
   .mono { font-family: var(--mono); }
   .muted { color: var(--muted); }
   .detail td { background: var(--panel); }
@@ -66,6 +69,7 @@
 <header>
   <h1>maiGoLLMRouter</h1>
   <span class="muted" style="font-size:13px">request logs</span>
+  <span id="inflight-count" class="badge" style="display:none;color:var(--accent)"></span>
   <div class="spacer"></div>
   <button id="refresh" title="Click to refresh now · hold to toggle auto-refresh">Refresh</button>
 </header>
@@ -77,6 +81,7 @@
         <th>Served by</th><th>Attempts</th><th>In tokens</th><th>Out tokens</th><th>Finish</th><th>Latency</th>
       </tr>
     </thead>
+    <tbody id="inflight-rows"></tbody>
     <tbody id="rows"></tbody>
   </table>
   <div id="empty" class="empty" style="display:none">No log entries yet.</div>
@@ -84,6 +89,8 @@
 
 <script>
 const rowsEl = document.getElementById('rows');
+const inflightRowsEl = document.getElementById('inflight-rows');
+const inflightCountEl = document.getElementById('inflight-count');
 const emptyEl = document.getElementById('empty');
 let timer = null;
 let autoOn = false;                // auto-refresh state (toggled by holding Refresh)
@@ -94,6 +101,90 @@ let oldestTime = null;             // server time of oldest loaded entry (cursor
 let atEnd = false;                 // true once an older page returned < a full batch
 let loadingOlder = false;          // guards concurrent infinite-scroll loads
 const PAGE = 50;
+const inflightById = new Map();      // id -> tr
+
+function fmtElapsed(startedAt) {
+  const ms = Date.now() - Date.parse(startedAt);
+  if (!Number.isFinite(ms) || ms < 0) return '<span class="muted">—</span>';
+  return esc((ms / 1000).toFixed(2)) + ' s';
+}
+
+function inflightServed(e) {
+  if (e.current_target) return esc(e.current_target);
+  return '<span class="muted">—</span>';
+}
+
+function inflightFinish(e) {
+  if (!e.last_outcome) return '<span class="muted">—</span>';
+  return `<span class="o-${esc(e.last_outcome)}">${esc(e.last_outcome)}</span>`;
+}
+
+function updateInflightRow(tr, e) {
+  tr.innerHTML = `
+    <td class="muted">${esc(fmtTime(e.started_at))}</td>
+    <td><span class="pill active">active</span></td>
+    <td>${esc(e.endpoint)}</td>
+    <td class="mono">${esc(e.inbound_model)}</td>
+    <td class="mono">${inflightServed(e)}</td>
+    <td>${esc(e.attempts || 0)}</td>
+    <td class="mono"><span class="muted">—</span></td>
+    <td class="mono"><span class="muted">—</span></td>
+    <td class="mono">${inflightFinish(e)}</td>
+    <td class="muted" data-elapsed="${esc(e.started_at)}">${fmtElapsed(e.started_at)}</td>`;
+}
+
+function makeInflightRow(e) {
+  const tr = document.createElement('tr');
+  tr.className = 'inflight';
+  tr.dataset.id = e.id;
+  updateInflightRow(tr, e);
+  return tr;
+}
+
+function updateInflightCount(n) {
+  if (!n) {
+    inflightCountEl.style.display = 'none';
+    inflightCountEl.textContent = '';
+    return;
+  }
+  inflightCountEl.style.display = '';
+  inflightCountEl.textContent = n + ' in flight';
+}
+
+function renderInflight(list) {
+  const seen = new Set();
+  const frag = document.createDocumentFragment();
+  for (const e of list) {
+    if (!e.id) continue;
+    seen.add(e.id);
+    let tr = inflightById.get(e.id);
+    if (!tr) {
+      tr = makeInflightRow(e);
+      inflightById.set(e.id, tr);
+      frag.appendChild(tr);
+    } else {
+      updateInflightRow(tr, e);
+    }
+  }
+  if (frag.firstChild) inflightRowsEl.insertBefore(frag, inflightRowsEl.firstChild);
+  for (const [id, tr] of inflightById) {
+    if (!seen.has(id)) {
+      tr.remove();
+      inflightById.delete(id);
+    }
+  }
+  const ordered = list.filter(e => e.id && inflightById.has(e.id)).map(e => inflightById.get(e.id));
+  for (const tr of ordered) inflightRowsEl.appendChild(tr);
+  updateInflightCount(list.length);
+}
+
+async function refreshInflight() {
+  try {
+    const res = await fetch('/ui/inflight');
+    const data = await res.json();
+    renderInflight(data.requests || []);
+  } catch (err) { /* transient; next tick retries */ }
+}
 
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
@@ -302,8 +393,11 @@ function addEntries(list, where) {
 // loadInitial fetches the cached recent entries shown on first open.
 async function loadInitial() {
   try {
-    const res = await fetch('/ui/logs');
-    const data = await res.json();
+    const [logsRes] = await Promise.all([
+      fetch('/ui/logs'),
+      refreshInflight(),
+    ]);
+    const data = await logsRes.json();
     addEntries(data.entries || [], 'bottom');
     updateEmpty();
     maybeLoadMore();
@@ -320,7 +414,10 @@ async function loadInitial() {
 async function refresh() {
   const url = newestTime ? '/ui/logs?since=' + encodeURIComponent(newestTime) : '/ui/logs';
   try {
-    const res = await fetch(url);
+    const [res] = await Promise.all([
+      fetch(url),
+      refreshInflight(),
+    ]);
     const data = await res.json();
     const list = data.entries || [];
     if (!list.length) return;
@@ -371,6 +468,14 @@ function setAuto(on) {
   refreshBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
   if (timer) { clearInterval(timer); timer = null; }
   if (on) timer = setInterval(refresh, 3000);
+  else updateInflightElapsed();
+}
+
+function updateInflightElapsed() {
+  for (const tr of inflightById.values()) {
+    const td = tr.querySelector('[data-elapsed]');
+    if (td) td.innerHTML = fmtElapsed(td.dataset.elapsed);
+  }
 }
 
 // The single Refresh button is both an action and a toggle: a short click
