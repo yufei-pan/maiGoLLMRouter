@@ -151,7 +151,10 @@ targets = ["openai/real-model"]
 	}
 }
 
-func TestOutputVerificationRetry(t *testing.T) {
+// TestBadOutputDoesNotRetrySameKey verifies a bad output is treated like a
+// provider error: the same key is never retried in place (which would burn the
+// key's rate limit), and the normal key is blacked out before moving on.
+func TestBadOutputDoesNotRetrySameKey(t *testing.T) {
 	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
@@ -160,9 +163,6 @@ func TestOutputVerificationRetry(t *testing.T) {
 	defer srv.Close()
 
 	cfg := loadCfg(t, fmt.Sprintf(`
-[server]
-max_retries = 2
-
 [[provider]]
 name = "openai"
 kind = "openai"
@@ -173,12 +173,13 @@ keys = ["n1"]
 targets = ["openai/real-model"]
 `, srv.URL))
 
-	res := New(cfg).Execute(context.Background(), provider.OpChat, "m", chatReq())
+	r := New(cfg)
+	res := r.Execute(context.Background(), provider.OpChat, "m", chatReq())
 	if res.Success {
 		t.Fatal("expected non-success for bad finish reason")
 	}
-	if calls != 3 { // 1 initial + 2 retries
-		t.Errorf("calls = %d, want 3", calls)
+	if calls != 1 { // the single key is tried exactly once, never retried
+		t.Errorf("calls = %d, want 1 (no same-key retry)", calls)
 	}
 	badOutputs := 0
 	for _, a := range res.Attempts {
@@ -186,8 +187,11 @@ targets = ["openai/real-model"]
 			badOutputs++
 		}
 	}
-	if badOutputs != 3 {
-		t.Errorf("bad_output attempts = %d, want 3", badOutputs)
+	if badOutputs != 1 {
+		t.Errorf("bad_output attempts = %d, want 1", badOutputs)
+	}
+	if !r.blackout.Blocked("n1", "real-model") {
+		t.Errorf("bad output should black out the normal key like a provider error")
 	}
 }
 

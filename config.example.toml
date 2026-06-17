@@ -20,8 +20,10 @@ client_keys = []
 # blacked out.
 global_blackout = "60s"
 
-# Number of retries on the SAME key when the output did not finish normally.
-# Transport/HTTP errors do not retry; they fail the key and advance.
+# Deprecated and ignored. A key is never retried in place. A bad/unfinished
+# output (including an HTTP 200 that carries an error in its body) is now
+# treated like a transport/HTTP error: the normal key is blacked out and the
+# router advances to the next key. Kept only so older configs still load.
 max_retries = 2
 
 # Normalized finish reasons considered a successful completion.

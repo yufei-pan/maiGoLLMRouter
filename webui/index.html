@@ -71,6 +71,17 @@
   <span class="muted" style="font-size:13px">request logs</span>
   <span id="inflight-count" class="badge" style="display:none;color:var(--accent)"></span>
   <div class="spacer"></div>
+  <input id="f-model" type="search" placeholder="Filter by model…" autocomplete="off"
+    title="Match inbound model or served provider/model (comma = OR)" style="width:200px" />
+  <select id="f-status" title="Filter by outcome">
+    <option value="all">All status</option>
+    <option value="success">Success (2xx)</option>
+    <option value="error">Errors</option>
+  </select>
+  <select id="f-endpoint" title="Filter by endpoint">
+    <option value="all">All endpoints</option>
+  </select>
+  <button id="f-clear" title="Clear all filters">Clear</button>
   <button id="refresh" title="Click to refresh now · hold to toggle auto-refresh">Refresh</button>
 </header>
 <div class="wrap">
@@ -100,8 +111,36 @@ let newestTime = null;             // server time of newest loaded entry (cursor
 let oldestTime = null;             // server time of oldest loaded entry (cursor)
 let atEnd = false;                 // true once an older page returned < a full batch
 let loadingOlder = false;          // guards concurrent infinite-scroll loads
-const PAGE = 50;
+const PAGE = 100;                  // entries fetched per infinite-scroll page
+// PRELOAD_PX is how far below the viewport (in px) the next page starts
+// loading. A generous margin keeps a tall buffer of rows ready so fast scrolls
+// don't reach the bottom before the next page arrives. With an active filter,
+// many rows are hidden, so the loader also keeps pulling pages until the buffer
+// is full (see maybeLoadMore).
+const PRELOAD_PX = 2000;
 const inflightById = new Map();      // id -> tr
+
+// filters holds the current client-side filter state. Filtering is done purely
+// in the browser over already-loaded rows; the loader keeps fetching older
+// pages so a narrow filter still fills the viewport.
+const filters = { model: '', status: 'all', endpoint: 'all' };
+
+// entryMatches reports whether a log index entry passes the active filters.
+function entryMatches(e) {
+  if (filters.status === 'success' && !(e.status >= 200 && e.status < 300)) return false;
+  if (filters.status === 'error' && (e.status >= 200 && e.status < 300)) return false;
+  if (filters.endpoint !== 'all' && (e.endpoint || '') !== filters.endpoint) return false;
+  return modelMatches((e.inbound_model || '') + ' ' + (e.served_by || ''));
+}
+
+// modelMatches applies the model text filter to a haystack string. The query
+// supports comma-separated OR terms; an empty query matches everything.
+function modelMatches(hay) {
+  const q = filters.model.trim().toLowerCase();
+  if (!q) return true;
+  hay = hay.toLowerCase();
+  return q.split(',').map(s => s.trim()).filter(Boolean).some(term => hay.includes(term));
+}
 
 function fmtElapsed(startedAt) {
   const ms = Date.now() - Date.parse(startedAt);
@@ -120,6 +159,7 @@ function inflightFinish(e) {
 }
 
 function updateInflightRow(tr, e) {
+  tr._entry = e; // retained so a later filter change can re-evaluate this row
   tr.innerHTML = `
     <td class="muted">${esc(fmtTime(e.started_at))}</td>
     <td><span class="pill active">active</span></td>
@@ -141,6 +181,18 @@ function makeInflightRow(e) {
   return tr;
 }
 
+// inflightMatches applies the model and endpoint filters to an in-flight entry.
+// The status filter is ignored for in-flight rows since they have no final
+// status yet; current activity stays visible whenever its model/endpoint match.
+function inflightMatches(e) {
+  if (filters.endpoint !== 'all' && (e.endpoint || '') !== filters.endpoint) return false;
+  return modelMatches((e.inbound_model || '') + ' ' + (e.current_target || ''));
+}
+
+function applyInflightRowFilter(tr, e) {
+  tr.style.display = inflightMatches(e) ? '' : 'none';
+}
+
 function updateInflightCount(n) {
   if (!n) {
     inflightCountEl.style.display = 'none';
@@ -157,6 +209,7 @@ function renderInflight(list) {
   for (const e of list) {
     if (!e.id) continue;
     seen.add(e.id);
+    registerEndpoint(e.endpoint);
     let tr = inflightById.get(e.id);
     if (!tr) {
       tr = makeInflightRow(e);
@@ -165,6 +218,7 @@ function renderInflight(list) {
     } else {
       updateInflightRow(tr, e);
     }
+    applyInflightRowFilter(tr, e);
   }
   if (frag.firstChild) inflightRowsEl.insertBefore(frag, inflightRowsEl.firstChild);
   for (const [id, tr] of inflightById) {
@@ -326,7 +380,34 @@ async function fillDetail(path, td) {
 }
 
 function scroller() { return document.scrollingElement || document.documentElement; }
-function updateEmpty() { emptyEl.style.display = rowsByPath.size ? 'none' : 'block'; }
+
+// visibleRowCount counts log rows currently shown (not hidden by a filter).
+function visibleRowCount() {
+  let n = 0;
+  for (const r of rowsByPath.values()) if (r.tr.style.display !== 'none') n++;
+  return n;
+}
+
+function updateEmpty() {
+  if (rowsByPath.size === 0) {
+    emptyEl.textContent = 'No log entries yet.';
+    emptyEl.style.display = 'block';
+    return;
+  }
+  if (visibleRowCount() === 0) {
+    // Keep the loader pulling older pages; only declare "no matches" once the
+    // whole history has been scanned for the current filter.
+    if (atEnd && !loadingOlder) {
+      emptyEl.textContent = 'No entries match the current filter.';
+      emptyEl.style.display = 'block';
+    } else {
+      emptyEl.textContent = 'Searching older entries…';
+      emptyEl.style.display = 'block';
+    }
+    return;
+  }
+  emptyEl.style.display = 'none';
+}
 
 // makeRow builds the list row plus its (hidden) detail row from one index entry.
 function makeRow(e) {
@@ -362,7 +443,15 @@ function makeRow(e) {
       expanded.delete(path);
     }
   });
-  return { tr, dt };
+  return { tr, dt, entry: e };
+}
+
+// applyRowFilter shows or hides a log row (and its detail) per the active
+// filters, restoring an expanded detail only when its row is visible.
+function applyRowFilter(r) {
+  const show = entryMatches(r.entry);
+  r.tr.style.display = show ? '' : 'none';
+  r.dt.style.display = (show && expanded.has(r.entry.path)) ? 'table-row' : 'none';
 }
 
 // addEntries inserts a batch of index entries (server-ordered newest first),
@@ -376,6 +465,8 @@ function addEntries(list, where) {
     if (!e.path || rowsByPath.has(e.path)) continue;
     const r = makeRow(e);
     rowsByPath.set(e.path, r);
+    registerEndpoint(e.endpoint);
+    applyRowFilter(r);
     frag.appendChild(r.tr);
     frag.appendChild(r.dt);
     added++;
@@ -449,13 +540,18 @@ async function loadOlder() {
   }
 }
 
-// maybeLoadMore loads another older page when the bottom is in view. It also
-// keeps loading until the page is tall enough to scroll, so short content can
-// still be paged through.
+// maybeLoadMore loads another older page when the buffered content below the
+// viewport falls under PRELOAD_PX. It also keeps loading while a filter hides
+// most rows (so a narrow filter still fills the screen) and until the page is
+// tall enough to scroll at all.
 function maybeLoadMore() {
   if (atEnd || loadingOlder) return;
   const se = scroller();
-  if (se.scrollHeight - se.scrollTop - se.clientHeight < 300) loadOlder();
+  const below = se.scrollHeight - se.scrollTop - se.clientHeight;
+  const filtering = filters.model || filters.status !== 'all' || filters.endpoint !== 'all';
+  // When filtering, the visible buffer can be tiny even with many rows loaded,
+  // so keep paging until either the buffer is full or the history is exhausted.
+  if (below < PRELOAD_PX || (filtering && se.scrollHeight <= se.clientHeight)) loadOlder();
 }
 
 window.addEventListener('scroll', maybeLoadMore, { passive: true });
@@ -505,6 +601,58 @@ refreshBtn.addEventListener('pointerup', () => {
 });
 refreshBtn.addEventListener('pointercancel', cancelHold);
 refreshBtn.addEventListener('contextmenu', (e) => e.preventDefault()); // no menu on long-press
+
+// --- Client-side filtering -------------------------------------------------
+const fModel = document.getElementById('f-model');
+const fStatus = document.getElementById('f-status');
+const fEndpoint = document.getElementById('f-endpoint');
+const fClear = document.getElementById('f-clear');
+const knownEndpoints = new Set();
+
+// registerEndpoint adds any newly seen endpoint to the endpoint filter dropdown
+// so the options grow as logs stream in, without disturbing the selection.
+function registerEndpoint(ep) {
+  if (!ep || knownEndpoints.has(ep)) return;
+  knownEndpoints.add(ep);
+  const opts = [...knownEndpoints].sort();
+  const cur = fEndpoint.value;
+  fEndpoint.innerHTML = '<option value="all">All endpoints</option>' +
+    opts.map(e => `<option value="${esc(e)}">${esc(e)}</option>`).join('');
+  fEndpoint.value = cur;
+}
+
+// applyFilters re-evaluates every loaded row against the current filters, then
+// nudges the loader so a narrow filter keeps pulling older pages to fill the
+// viewport.
+function applyFilters() {
+  for (const r of rowsByPath.values()) applyRowFilter(r);
+  for (const tr of inflightById.values()) {
+    if (tr._entry) applyInflightRowFilter(tr, tr._entry);
+  }
+  updateEmpty();
+  maybeLoadMore();
+}
+
+let filterTimer = null;
+function onFilterChange() {
+  filters.model = fModel.value;
+  filters.status = fStatus.value;
+  filters.endpoint = fEndpoint.value;
+  applyFilters();
+}
+fModel.addEventListener('input', () => {
+  clearTimeout(filterTimer);
+  filterTimer = setTimeout(onFilterChange, 120);
+});
+fStatus.addEventListener('change', onFilterChange);
+fEndpoint.addEventListener('change', onFilterChange);
+fClear.addEventListener('click', () => {
+  fModel.value = '';
+  fStatus.value = 'all';
+  fEndpoint.value = 'all';
+  onFilterChange();
+  fModel.focus();
+});
 
 loadInitial();
 setAuto(true); // auto-refresh on by default

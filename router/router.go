@@ -203,50 +203,49 @@ func (r *Router) Execute(ctx context.Context, op provider.Operation, inboundMode
 	return res
 }
 
-// tryKey performs up to 1+maxRetries calls on a single key, retrying only on
-// bad output. The done return is true when the request finishes the whole
-// routing run (res is populated): success or caller cancellation. The skip
-// return is true when the provider/model combo returned a content-policy block,
-// signaling the caller to skip the combo's remaining keys and advance to the
-// next target/fallback without blacking out the key.
+// tryKey performs a single call on one key. The done return is true when the
+// request finishes the whole routing run (res is populated): success or caller
+// cancellation. The skip return is true when the provider/model combo returned
+// a content-policy block, signaling the caller to skip the combo's remaining
+// keys and advance to the next target/fallback without blacking out the key.
+//
+// A key is never retried in place. A bad output is treated exactly like a
+// provider error (see callOnce): both black out the normal key and advance to
+// the next key. Retrying the same key would burn the key's rate limit (RPM)
+// without changing a deterministic-looking failure, so the router moves on.
 func (r *Router) tryKey(ctx context.Context, res *Result, p *config.Provider, model string, op provider.Operation, body map[string]any, key, keyType string, last **provider.Response) (done, skip bool) {
-	retries := r.cfg.Server.MaxRetries
-	for i := 0; ; i++ {
-		resp, att, oc := r.callOnce(ctx, p, model, op, body, key, keyType)
-		res.Attempts = append(res.Attempts, att)
-		notifyAttempt(ctx, att)
-		if resp != nil {
-			*last = resp
+	resp, att, oc := r.callOnce(ctx, p, model, op, body, key, keyType)
+	res.Attempts = append(res.Attempts, att)
+	notifyAttempt(ctx, att)
+	if resp != nil {
+		*last = resp
+	}
+	switch oc {
+	case outcomeSuccess:
+		res.Success = true
+		res.Status = resp.HTTPStatus
+		res.Body = resp.OpenAIBody
+		res.Provider = p.Name
+		res.Model = model
+		return true, false
+	case outcomeCanceled:
+		// Caller went away: stop the whole routing run without blackout.
+		res.Status = 499 // "Client Closed Request" (nginx convention)
+		res.Body = errorBody("request canceled by caller", "request_canceled")
+		return true, false
+	case outcomeProhibited:
+		// Deterministic content-policy block: retrying with other keys for
+		// this combo is futile and not a provider/key fault, so skip the
+		// combo without blacking out the key.
+		return false, true
+	default: // outcomeProviderError and outcomeBadOutput
+		// Both an HTTP/transport error and a bad output (e.g. an HTTP 200 that
+		// carries a provider error in its body, or a response that did not
+		// finish normally) black out the normal key and move on to the next.
+		if keyType == "normal" {
+			r.blackout.Fail(key, model)
 		}
-		switch oc {
-		case outcomeSuccess:
-			res.Success = true
-			res.Status = resp.HTTPStatus
-			res.Body = resp.OpenAIBody
-			res.Provider = p.Name
-			res.Model = model
-			return true, false
-		case outcomeCanceled:
-			// Caller went away: stop the whole routing run without blackout.
-			res.Status = 499 // "Client Closed Request" (nginx convention)
-			res.Body = errorBody("request canceled by caller", "request_canceled")
-			return true, false
-		case outcomeProhibited:
-			// Deterministic content-policy block: retrying with other keys for
-			// this combo is futile and not a provider/key fault, so skip the
-			// combo without blacking out the key.
-			return false, true
-		case outcomeProviderError:
-			if keyType == "normal" {
-				r.blackout.Fail(key, model)
-			}
-			return false, false
-		case outcomeBadOutput:
-			if i >= retries {
-				return false, false
-			}
-			// retry the same key without blackout
-		}
+		return false, false
 	}
 }
 
@@ -311,7 +310,7 @@ func (r *Router) callOnce(ctx context.Context, p *config.Provider, model string,
 	if strings.EqualFold(resp.FinishReason, "length") {
 		detail = " (response truncated by max output tokens)"
 	}
-	log.Printf("WARNING: output did not finish normally: provider=%s model=%s key=%s finish_reason=%s%s — will retry/fallback",
+	log.Printf("WARNING: output did not finish normally: provider=%s model=%s key=%s finish_reason=%s%s — blacking out key and moving on",
 		p.Name, model, maskKey(key), reason, detail)
 	return resp, att, outcomeBadOutput
 }
