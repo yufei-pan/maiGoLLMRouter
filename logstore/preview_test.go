@@ -13,7 +13,8 @@ func TestRequestContentPreview(t *testing.T) {
 		want string
 	}{
 		{"chat user message", `{"messages":[{"role":"user","content":"hello world"}]}`, "hello world"},
-		{"last user wins", `{"messages":[{"role":"user","content":"first"},{"role":"assistant","content":"ok"},{"role":"user","content":"second"}]}`, "second"},
+		{"first message wins", `{"messages":[{"role":"system","content":"You are helpful"},{"role":"user","content":"hi"}]}`, "You are helpful"},
+		{"skip empty first", `{"messages":[{"role":"system","content":""},{"role":"user","content":"hi"}]}`, "hi"},
 		{"assistant only", `{"messages":[{"role":"assistant","content":"hi"}]}`, "hi"},
 		{"embed input string", `{"input":"embed me"}`, "embed me"},
 		{"embed input array", `{"input":["a","b"]}`, "ab"},

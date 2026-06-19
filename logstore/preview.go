@@ -11,7 +11,7 @@ import (
 const DefaultRequestPreviewLen = 16
 
 // requestContentPreview extracts a short plain-text preview from an inbound
-// request body: the last user message content for chat, or the input field for
+// request body: the first message content for chat, or the input field for
 // embeddings. Returns empty when nothing recognizable is present.
 func requestContentPreview(req json.RawMessage, maxLen int) string {
 	if len(req) == 0 || maxLen <= 0 {
@@ -50,23 +50,12 @@ func textFromMessages(raw json.RawMessage) string {
 	if err := json.Unmarshal(raw, &messages); err != nil {
 		return ""
 	}
-	lastUser := ""
-	lastAny := ""
 	for _, msg := range messages {
-		content := jsonContentText(msg["content"])
-		if content == "" {
-			continue
-		}
-		lastAny = content
-		role, _ := parseJSONString(msg["role"])
-		if role == "user" {
-			lastUser = content
+		if content := jsonContentText(msg["content"]); content != "" {
+			return content
 		}
 	}
-	if lastUser != "" {
-		return lastUser
-	}
-	return lastAny
+	return ""
 }
 
 func parseJSONString(raw json.RawMessage) (string, bool) {
