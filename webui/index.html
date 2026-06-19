@@ -88,7 +88,7 @@
   <table>
     <thead>
       <tr>
-        <th>Time</th><th>Status</th><th>Endpoint</th><th>Inbound model</th>
+        <th>Time</th><th>Status</th><th>Endpoint</th><th>Inbound model</th><th>Request</th>
         <th>Served by</th><th>Attempts</th><th>In tokens</th><th>Out tokens</th><th>Finish</th><th>Latency</th>
       </tr>
     </thead>
@@ -165,6 +165,7 @@ function updateInflightRow(tr, e) {
     <td><span class="pill active">active</span></td>
     <td>${esc(e.endpoint)}</td>
     <td class="mono">${esc(e.inbound_model)}</td>
+    <td></td>
     <td class="mono">${inflightServed(e)}</td>
     <td>${esc(e.attempts || 0)}</td>
     <td class="mono"><span class="muted">—</span></td>
@@ -416,11 +417,13 @@ function makeRow(e) {
   tr.className = 'row';
   const ok = e.status >= 200 && e.status < 300;
   const served = e.served_by ? esc(e.served_by) : '<span class="muted">—</span>';
+  const preview = e.request_preview ? `<td class="mono muted">${esc(e.request_preview)}</td>` : '<td></td>';
   tr.innerHTML = `
     <td class="muted">${esc(fmtTime(e.time))}</td>
     <td><span class="pill ${ok ? 'ok' : 'err'}">${esc(e.status)}</span></td>
     <td>${esc(e.endpoint)}</td>
     <td class="mono">${esc(e.inbound_model)}</td>
+    ${preview}
     <td class="mono">${served}</td>
     <td>${esc(e.attempts)}</td>
     <td class="mono">${fmtTokens(e.in_tokens)}</td>
@@ -430,7 +433,7 @@ function makeRow(e) {
   const dt = document.createElement('tr');
   dt.className = 'detail';
   const td = document.createElement('td');
-  td.colSpan = 10;
+  td.colSpan = 11;
   dt.appendChild(td);
   dt.style.display = 'none';
   tr.addEventListener('click', () => {

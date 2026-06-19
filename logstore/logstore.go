@@ -28,7 +28,7 @@ const (
 	// indexHeader documents the TSV columns. It begins with '#' so the parser
 	// skips it as a comment. Adding columns in the future stays compatible:
 	// readers take the leading fields they recognize and ignore the rest.
-	indexHeader = "# File Path\tTime\tStatus\tEndpoint\tInbound model\tServed by\tAttempts\tIn tokens\tOut tokens\tLatency\tFinish reason\n"
+	indexHeader = "# File Path\tTime\tStatus\tEndpoint\tInbound model\tServed by\tAttempts\tIn tokens\tOut tokens\tLatency\tFinish reason\tRequest preview\n"
 
 	// cacheWindow, cacheMin and cacheMax bound the in-memory index cache: keep
 	// roughly the last cacheWindow of entries, but never fewer than cacheMin
@@ -78,7 +78,8 @@ type IndexEntry struct {
 	InTokens     *int   `json:"in_tokens"`
 	OutTokens    *int   `json:"out_tokens"`
 	LatencyMS    int64  `json:"latency_ms"`
-	FinishReason string `json:"finish_reason"` // finish reason of the served/last attempt
+	FinishReason   string `json:"finish_reason"`   // finish reason of the served/last attempt
+	RequestPreview string `json:"request_preview"` // first N chars of inbound request content
 }
 
 // Store is a thread-safe log writer/reader rooted at a directory.
@@ -217,6 +218,7 @@ func (s *Store) indexEntryFor(e Entry, relPath string) IndexEntry {
 		idx.InTokens = &p
 		idx.OutTokens = &c
 	}
+	idx.RequestPreview = requestContentPreview(e.Request, DefaultRequestPreviewLen)
 	return idx
 }
 
@@ -540,6 +542,8 @@ func formatIndexLine(e IndexEntry) string {
 	b.WriteString(strconv.FormatInt(e.LatencyMS, 10))
 	b.WriteByte('\t')
 	b.WriteString(tsvField(e.FinishReason))
+	b.WriteByte('\t')
+	b.WriteString(tsvField(e.RequestPreview))
 	b.WriteByte('\n')
 	return b.String()
 }
@@ -669,6 +673,9 @@ func parseIndexLine(f []string) (IndexEntry, bool) {
 	}
 	if len(f) > 10 {
 		e.FinishReason = f[10]
+	}
+	if len(f) > 11 {
+		e.RequestPreview = f[11]
 	}
 	return e, true
 }

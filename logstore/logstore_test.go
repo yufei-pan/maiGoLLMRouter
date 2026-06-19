@@ -74,14 +74,17 @@ func TestWriteCreatesJSONFileAndIndex(t *testing.T) {
 		t.Errorf("first line should be the comment header, got %q", lines[0])
 	}
 	cols := strings.Split(lines[1], "\t")
-	if len(cols) != 11 {
-		t.Fatalf("want 11 TSV columns, got %d: %q", len(cols), cols)
+	if len(cols) != 12 {
+		t.Fatalf("want 12 TSV columns, got %d: %q", len(cols), cols)
 	}
 	if cols[0] != "2026-06/04/req-0000" {
 		t.Errorf("col0 path = %q", cols[0])
 	}
 	if cols[7] != "11" || cols[8] != "7" {
 		t.Errorf("want in/out tokens 11/7, got %q/%q", cols[7], cols[8])
+	}
+	if cols[11] != "hi" {
+		t.Errorf("request preview = %q, want hi", cols[11])
 	}
 }
 
@@ -97,6 +100,9 @@ func TestRecentNewestFirst(t *testing.T) {
 	}
 	if got[0].InTokens == nil || *got[0].InTokens != 11 {
 		t.Errorf("want in_tokens 11, got %v", got[0].InTokens)
+	}
+	if got[0].RequestPreview != "hi" {
+		t.Errorf("want request_preview hi, got %q", got[0].RequestPreview)
 	}
 }
 
