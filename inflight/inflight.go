@@ -11,23 +11,27 @@ import (
 
 // Meta is the initial metadata for a newly registered in-flight request.
 type Meta struct {
-	ID           string
-	StartedAt    string
-	Endpoint     string
-	InboundModel string
-	ClientKey    string
+	ID             string
+	StartedAt      string
+	Endpoint       string
+	InboundModel   string
+	ClientKey      string
+	RequestPreview string
+	InTokens       int // rough estimate for live UI preview
 }
 
 // Entry describes one request currently being routed.
 type Entry struct {
-	ID           string `json:"id"`
-	StartedAt    string `json:"started_at"`
-	Endpoint     string `json:"endpoint"`
-	InboundModel string `json:"inbound_model"`
-	ClientKey    string `json:"client_key,omitempty"`
-	Attempts     int    `json:"attempts"`
-	CurrentTarget string `json:"current_target,omitempty"`
-	LastOutcome  string `json:"last_outcome,omitempty"`
+	ID             string `json:"id"`
+	StartedAt      string `json:"started_at"`
+	Endpoint       string `json:"endpoint"`
+	InboundModel   string `json:"inbound_model"`
+	ClientKey      string `json:"client_key,omitempty"`
+	RequestPreview string `json:"request_preview,omitempty"`
+	InTokens       int    `json:"in_tokens,omitempty"`
+	Attempts       int    `json:"attempts"`
+	CurrentTarget  string `json:"current_target,omitempty"`
+	LastOutcome    string `json:"last_outcome,omitempty"`
 
 	mu sync.Mutex
 }
@@ -49,14 +53,16 @@ func (e *Entry) snapshot() Entry {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return Entry{
-		ID:            e.ID,
-		StartedAt:     e.StartedAt,
-		Endpoint:      e.Endpoint,
-		InboundModel:  e.InboundModel,
-		ClientKey:     e.ClientKey,
-		Attempts:      e.Attempts,
-		CurrentTarget: e.CurrentTarget,
-		LastOutcome:   e.LastOutcome,
+		ID:             e.ID,
+		StartedAt:      e.StartedAt,
+		Endpoint:       e.Endpoint,
+		InboundModel:   e.InboundModel,
+		ClientKey:      e.ClientKey,
+		RequestPreview: e.RequestPreview,
+		InTokens:       e.InTokens,
+		Attempts:       e.Attempts,
+		CurrentTarget:  e.CurrentTarget,
+		LastOutcome:    e.LastOutcome,
 	}
 }
 
@@ -74,11 +80,13 @@ func New() *Registry {
 // Register adds an entry and returns the live object for attempt updates.
 func (r *Registry) Register(meta Meta) *Entry {
 	live := &Entry{
-		ID:           meta.ID,
-		StartedAt:    meta.StartedAt,
-		Endpoint:     meta.Endpoint,
-		InboundModel: meta.InboundModel,
-		ClientKey:    meta.ClientKey,
+		ID:             meta.ID,
+		StartedAt:      meta.StartedAt,
+		Endpoint:       meta.Endpoint,
+		InboundModel:   meta.InboundModel,
+		ClientKey:      meta.ClientKey,
+		RequestPreview: meta.RequestPreview,
+		InTokens:       meta.InTokens,
 	}
 	if live.StartedAt == "" {
 		live.StartedAt = time.Now().UTC().Format(time.RFC3339Nano)

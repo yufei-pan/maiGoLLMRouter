@@ -149,11 +149,13 @@ func (s *Server) handle(op provider.Operation) http.HandlerFunc {
 		reqID := "req-" + randomID()
 		if s.inflight != nil {
 			live = s.inflight.Register(inflight.Meta{
-				ID:           reqID,
-				StartedAt:    start.UTC().Format(time.RFC3339Nano),
-				Endpoint:     endpoint,
-				InboundModel: model,
-				ClientKey:    maskKey(clientKey),
+				ID:             reqID,
+				StartedAt:      start.UTC().Format(time.RFC3339Nano),
+				Endpoint:       endpoint,
+				InboundModel:   model,
+				ClientKey:      maskKey(clientKey),
+				RequestPreview: logstore.RequestContentPreview(raw, logstore.DefaultRequestPreviewLen),
+				InTokens:       logstore.EstimateInTokens(raw),
 			})
 			defer s.inflight.Unregister(reqID)
 		}

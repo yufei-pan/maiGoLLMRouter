@@ -218,7 +218,7 @@ func (s *Store) indexEntryFor(e Entry, relPath string) IndexEntry {
 		idx.InTokens = &p
 		idx.OutTokens = &c
 	}
-	idx.RequestPreview = requestContentPreview(e.Request, DefaultRequestPreviewLen)
+	idx.RequestPreview = RequestContentPreview(e.Request, DefaultRequestPreviewLen)
 	return idx
 }
 

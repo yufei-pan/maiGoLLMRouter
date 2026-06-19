@@ -158,6 +158,17 @@ function inflightFinish(e) {
   return `<span class="o-${esc(e.last_outcome)}">${esc(e.last_outcome)}</span>`;
 }
 
+function inflightPreview(e) {
+  return e.request_preview
+    ? `<td class="mono muted">${esc(e.request_preview)}</td>`
+    : '<td></td>';
+}
+
+function inflightInTokens(e) {
+  if (e.in_tokens == null || e.in_tokens === 0) return '<span class="muted">—</span>';
+  return esc('~' + e.in_tokens);
+}
+
 function updateInflightRow(tr, e) {
   tr._entry = e; // retained so a later filter change can re-evaluate this row
   tr.innerHTML = `
@@ -165,10 +176,10 @@ function updateInflightRow(tr, e) {
     <td><span class="pill active">active</span></td>
     <td>${esc(e.endpoint)}</td>
     <td class="mono">${esc(e.inbound_model)}</td>
-    <td></td>
+    ${inflightPreview(e)}
     <td class="mono">${inflightServed(e)}</td>
     <td>${esc(e.attempts || 0)}</td>
-    <td class="mono"><span class="muted">—</span></td>
+    <td class="mono">${inflightInTokens(e)}</td>
     <td class="mono"><span class="muted">—</span></td>
     <td class="mono">${inflightFinish(e)}</td>
     <td class="muted" data-elapsed="${esc(e.started_at)}">${fmtElapsed(e.started_at)}</td>`;
