@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"maiGoLLMRouter/config"
@@ -19,6 +20,7 @@ import (
 
 // Server wires the router and log store to HTTP handlers.
 type Server struct {
+	mu         sync.RWMutex
 	cfg        *config.Config
 	rt         *router.Router
 	logs       *logstore.Store
@@ -33,6 +35,19 @@ func New(cfg *config.Config, rt *router.Router, logs *logstore.Store, active *in
 		keys[k] = true
 	}
 	return &Server{cfg: cfg, rt: rt, logs: logs, inflight: active, clientKeys: keys}
+}
+
+// Reload applies a new configuration to auth and routing. listen, log_dir, and
+// log_retention must be unchanged; the caller enforces that before calling.
+func (s *Server) Reload(cfg *config.Config) {
+	keys := make(map[string]bool, len(cfg.Server.ClientKeys))
+	for _, k := range cfg.Server.ClientKeys {
+		keys[k] = true
+	}
+	s.mu.Lock()
+	s.cfg = cfg
+	s.clientKeys = keys
+	s.mu.Unlock()
 }
 
 // Register attaches the API routes to the mux.
@@ -57,6 +72,8 @@ type modelObject struct {
 
 // modelIDs returns the sorted list of inbound model names the router can serve.
 func (s *Server) modelIDs() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	ids := make([]string, 0, len(s.cfg.Models))
 	for name := range s.cfg.Models {
 		ids = append(ids, name)
@@ -77,8 +94,9 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data := make([]modelObject, 0, len(s.cfg.Models))
-	for _, id := range s.modelIDs() {
+	ids := s.modelIDs()
+	data := make([]modelObject, 0, len(ids))
+	for _, id := range ids {
 		data = append(data, modelObject{ID: id, Object: "model", Created: 0, OwnedBy: "maiGoLLMRouter"})
 	}
 
@@ -102,7 +120,10 @@ func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := strings.TrimPrefix(r.URL.Path, "/v1/models/")
-	if _, ok := s.cfg.Models[id]; !ok {
+	s.mu.RLock()
+	_, ok := s.cfg.Models[id]
+	s.mu.RUnlock()
+	if !ok {
 		writeError(w, http.StatusNotFound, "model not found: "+id, "invalid_request_error")
 		return
 	}
@@ -184,7 +205,10 @@ func (s *Server) authorize(r *http.Request) (string, bool) {
 	if token == "" {
 		return "", false
 	}
-	if !s.clientKeys[token] {
+	s.mu.RLock()
+	allowed := s.clientKeys[token]
+	s.mu.RUnlock()
+	if !allowed {
 		return token, false
 	}
 	return token, true

@@ -83,9 +83,11 @@ sudo systemctl enable --now mai-go-llm-router
 ```
 
 Check status or follow logs with `systemctl status mai-go-llm-router` and
-`journalctl -u mai-go-llm-router -f`. Edit `User=` / `Group=` in the unit
-file if needed, or re-run `--generate-systemd` after moving the binary or
-config so paths stay correct.
+`journalctl -u mai-go-llm-router -f`. Reload routing config after editing
+`config.toml` with `systemctl reload mai-go-llm-router` (sends SIGHUP; the
+service also polls the file every 3s by default). Edit `User=` / `Group=` in
+the unit file if needed, or re-run `--generate-systemd` after moving the binary
+or config so paths stay correct.
 
 ### Example request
 
@@ -111,6 +113,8 @@ See `[config.example.toml](config.example.toml)` for a fully commented example.
 | `global_blackout`     | Duration a failed normal (key, model) combination is skipped (default `60s`).                              |
 | `max_retries`         | Deprecated, no-op. A key is never retried in place; a bad output now blacks out the key and moves on, like a provider error. Kept only so old configs still load. |
 | `good_finish_reasons` | Normalized finish reasons treated as success.                                                              |
+| `config_reload_interval` | Poll interval for automatic config reload (default `3s`). Set to `0` to disable polling; `SIGHUP` / `systemctl reload` still reloads. |
+| `log_retention_days`  | Days to keep detail logs (default 60). `0` disables cleanup. Requires restart to change at runtime.        |
 
 
 ### Providers (`[[provider]]`, repeatable)

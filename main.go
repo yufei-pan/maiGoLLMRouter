@@ -29,7 +29,7 @@ import (
 // version is the build version. Override at build time with:
 //
 //	go build -ldflags "-X main.version=1.2.3"
-var version = "0.1.14"
+var version = "0.1.15"
 
 func main() {
 	const defaultConfig = "config.toml"
@@ -78,6 +78,9 @@ func main() {
 	rt := router.New(cfg)
 	active := inflight.New()
 	srv := server.New(cfg, rt, logs, active)
+	reloader := newConfigReloader(configPath, cfg, rt, srv, logs)
+	startSignalReload(reloader.tryReload)
+	reloader.startWatch(cfg.Server.ConfigReloadInterval)
 
 	mux := http.NewServeMux()
 	srv.Register(mux)
@@ -90,6 +93,7 @@ func main() {
 	}
 
 	logStartup(cfg, configPath)
+	log.Printf("config reload: SIGHUP / systemctl reload; auto poll every %s (set config_reload_interval = \"0\" to disable polling)", formatReloadInterval(cfg.Server.ConfigReloadInterval))
 	if err := httpServer.ListenAndServe(); err != nil {
 		log.Fatalf("server: %v", err)
 	}
@@ -165,6 +169,13 @@ func logStartup(cfg *config.Config, configPath string) {
 		log.Printf("fallback providers (%s): %s", cfg.FallbackSelection, strings.Join(cfg.FallbackProviders, ", "))
 	}
 	log.Printf("web UI: %s/ui", base)
+}
+
+func formatReloadInterval(d time.Duration) string {
+	if d <= 0 {
+		return "disabled"
+	}
+	return d.String()
 }
 
 func usage() {

@@ -80,6 +80,7 @@ func renderSystemdUnit(p systemdUnitParams) string {
 	}
 	fmt.Fprintf(&b, "WorkingDirectory=%s\n", p.WorkingDirectory)
 	fmt.Fprintf(&b, "ExecStart=%s\n", p.ExecStart)
+	fmt.Fprintf(&b, "ExecReload=/bin/kill -HUP $MAINPID\n")
 	b.WriteString("Restart=on-failure\n")
 	b.WriteString("RestartSec=5\n\n")
 
@@ -148,6 +149,7 @@ func printSystemdInstallInstructions(outPath string) {
 	fmt.Println()
 	fmt.Println("Useful commands:")
 	fmt.Printf("  systemctl status %s\n", strings.TrimSuffix(unitName, ".service"))
+	fmt.Printf("  systemctl reload %s   # reload config (SIGHUP)\n", strings.TrimSuffix(unitName, ".service"))
 	fmt.Printf("  journalctl -u %s -f\n", strings.TrimSuffix(unitName, ".service"))
 	fmt.Println()
 	fmt.Println("Edit User=/Group= in the unit file if the service should not run as your current login user.")

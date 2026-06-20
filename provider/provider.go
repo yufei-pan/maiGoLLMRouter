@@ -96,7 +96,11 @@ func isProhibitedContent(raw []byte) bool {
 			FinishReason string `json:"finishReason"`
 		} `json:"candidates"`
 		Choices []struct {
-			FinishReason string `json:"finish_reason"`
+			FinishReason       string `json:"finish_reason"`
+			NativeFinishReason string `json:"native_finish_reason"`
+			Message            struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
 		} `json:"choices"`
 	}
 	// Ignore the error: a partial decode still populates the fields we check, and
@@ -112,11 +116,29 @@ func isProhibitedContent(raw []byte) bool {
 		}
 	}
 	for _, c := range parsed.Choices {
-		if matchesProhibited(c.FinishReason) {
+		if matchesProhibited(c.FinishReason) || matchesProhibited(c.NativeFinishReason) {
+			return true
+		}
+		if isContentFilterFinish(c.FinishReason) && !messageHasContent(c.Message.Content) {
 			return true
 		}
 	}
 	return false
+}
+
+func messageHasContent(raw json.RawMessage) bool {
+	if len(raw) == 0 || string(raw) == "null" {
+		return false
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s != ""
+	}
+	return true
+}
+
+func isContentFilterFinish(s string) bool {
+	return strings.EqualFold(strings.TrimSpace(s), "content_filter")
 }
 
 func matchesProhibited(s string) bool {

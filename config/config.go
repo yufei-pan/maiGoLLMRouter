@@ -22,6 +22,10 @@ const (
 	// DefaultLogRetentionDays is how long detail log files are kept before
 	// cleanup. Roughly two months. Set log_retention_days = 0 to disable.
 	DefaultLogRetentionDays = 60
+	// DefaultConfigReloadInterval is how often the config file is polled for
+	// changes. Set config_reload_interval = "0" to disable polling; SIGHUP and
+	// systemctl reload still apply changes.
+	DefaultConfigReloadInterval = 3 * time.Second
 )
 
 // Target selection methods for model alias routing.
@@ -62,6 +66,10 @@ type Server struct {
 	// configs that still set max_retries continue to load without error.
 	MaxRetries        int
 	GoodFinishReasons map[string]bool
+
+	// ConfigReloadInterval controls automatic config reload when the file
+	// changes. Zero disables polling; SIGHUP / systemctl reload still reloads.
+	ConfigReloadInterval time.Duration
 
 	// GeneratedClientKey is set when client_keys was empty and a random key
 	// was generated to secure the inbound API. Empty otherwise.
@@ -133,6 +141,9 @@ type rawServer struct {
 	GlobalBlackout    string   `toml:"global_blackout"`
 	MaxRetries        int      `toml:"max_retries"`
 	GoodFinishReasons []string `toml:"good_finish_reasons"`
+	// Poll interval for automatic config reload (e.g. "3s"). "0" disables
+	// polling; SIGHUP / systemctl reload still reloads. Default: 3s.
+	ConfigReloadInterval string `toml:"config_reload_interval"`
 }
 
 type rawProvider struct {
@@ -218,6 +229,23 @@ func build(raw rawConfig) (*Config, error) {
 	srv.GoodFinishReasons = make(map[string]bool, len(reasons))
 	for _, r := range reasons {
 		srv.GoodFinishReasons[strings.ToLower(strings.TrimSpace(r))] = true
+	}
+	if raw.Server.ConfigReloadInterval == "" {
+		srv.ConfigReloadInterval = DefaultConfigReloadInterval
+	} else {
+		s, intervalRaw := strings.TrimSpace(raw.Server.ConfigReloadInterval), raw.Server.ConfigReloadInterval
+		if s == "0" || s == "0s" {
+			srv.ConfigReloadInterval = 0
+		} else {
+			d, err := time.ParseDuration(intervalRaw)
+			if err != nil {
+				return nil, fmt.Errorf("server.config_reload_interval: %w", err)
+			}
+			if d < 0 {
+				return nil, fmt.Errorf("server.config_reload_interval: must be >= 0")
+			}
+			srv.ConfigReloadInterval = d
+		}
 	}
 	cfg.Server = srv
 

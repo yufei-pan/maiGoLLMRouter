@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"maiGoLLMRouter/config"
@@ -18,6 +19,7 @@ import (
 
 // Router holds resolved configuration and per-provider HTTP clients.
 type Router struct {
+	mu       sync.RWMutex
 	cfg      *config.Config
 	blackout *Blackout
 	clients  map[string]*http.Client
@@ -34,6 +36,20 @@ func New(cfg *config.Config) *Router {
 		r.clients[name] = &http.Client{Timeout: p.Timeout}
 	}
 	return r
+}
+
+// Reload replaces routing configuration and rebuilds provider HTTP clients.
+// In-flight blackout state is preserved.
+func (r *Router) Reload(cfg *config.Config) {
+	clients := make(map[string]*http.Client, len(cfg.Providers))
+	for name, p := range cfg.Providers {
+		clients[name] = &http.Client{Timeout: p.Timeout}
+	}
+	r.mu.Lock()
+	r.cfg = cfg
+	r.clients = clients
+	r.mu.Unlock()
+	r.blackout.SetDuration(cfg.Server.GlobalBlackout)
 }
 
 // Attempt records a single downstream call for logging.
@@ -116,6 +132,9 @@ func (r *Router) fallbackTargets(model string) []config.Target {
 // Execute runs the full routing algorithm for one request and returns the
 // result along with a per-attempt log.
 func (r *Router) Execute(ctx context.Context, op provider.Operation, inboundModel string, body map[string]any) *Result {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
 	res := &Result{}
 	targets, err := r.Resolve(inboundModel)
 	if err != nil {

@@ -23,6 +23,7 @@ func TestRenderSystemdUnit(t *testing.T) {
 		"Group=router",
 		"WorkingDirectory=/etc/maiGoLLMRouter",
 		"ExecStart=/opt/maiGoLLMRouter -config /etc/maiGoLLMRouter/config.toml",
+		"ExecReload=/bin/kill -HUP $MAINPID",
 		"Restart=on-failure",
 		"[Install]",
 		"WantedBy=multi-user.target",

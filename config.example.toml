@@ -32,6 +32,11 @@ max_retries = 2
 # "length" means the client-requested max_tokens limit was hit (a normal completion).
 good_finish_reasons = ["stop", "length", "tool_calls", "function_call", "end_turn"]
 
+# Poll the config file for changes and reload routing settings automatically.
+# Default is 3s. Set to 0 to disable polling; SIGHUP / systemctl reload still
+# reloads without restarting the process.
+# config_reload_interval = "3s"
+
 # ---------------------------------------------------------------------------
 # Providers. The [[provider]] block is repeatable.
 #  - Same-name providers are MERGED: keys/fallback_keys/fallback_models are

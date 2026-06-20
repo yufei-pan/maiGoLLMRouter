@@ -556,6 +556,76 @@ targets = ["openai/real-model"]
 	}
 }
 
+// openRouterProhibitedBody mimics OpenRouter/Google AI Studio blocking content
+// with HTTP 200, content_filter finish reason, and native PROHIBITED_CONTENT.
+const openRouterProhibitedBody = `{"id":"gen-test","object":"chat.completion","choices":[{"index":0,"finish_reason":"content_filter","native_finish_reason":"PROHIBITED_CONTENT","message":{"role":"assistant","content":null}}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`
+
+func TestProhibitedContentOpenRouterBodySkipsOtherKeys(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		fmt.Fprint(w, openRouterProhibitedBody)
+	}))
+	defer srv.Close()
+
+	cfg := loadCfg(t, fmt.Sprintf(`
+[[provider]]
+name = "openrouter"
+kind = "openai"
+base_url = %q
+keys = ["k1","k2","k3"]
+
+[model."m"]
+targets = ["openrouter/google/gemma-4-31b-it:free"]
+`, srv.URL))
+
+	r := New(cfg)
+	res := r.Execute(context.Background(), provider.OpChat, "m", chatReq())
+	if res.Success {
+		t.Fatal("expected non-success for prohibited content")
+	}
+	if calls != 1 {
+		t.Errorf("calls = %d, want 1 (no other keys for same model)", calls)
+	}
+	if len(res.Attempts) != 1 || res.Attempts[0].Outcome != "prohibited_content" {
+		t.Fatalf("unexpected attempts: %+v", res.Attempts)
+	}
+	if !strings.Contains(string(res.Body), "content_filter") {
+		t.Errorf("expected upstream body returned as-is, got %s", res.Body)
+	}
+}
+
+func TestProhibitedContentReturnsAsIsWhenNoMoreModels(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		fmt.Fprint(w, openRouterProhibitedBody)
+	}))
+	defer srv.Close()
+
+	cfg := loadCfg(t, fmt.Sprintf(`
+[[provider]]
+name = "openrouter"
+kind = "openai"
+base_url = %q
+keys = ["k1","k2"]
+
+[model."m"]
+targets = ["openrouter/google/gemma-4-31b-it:free"]
+`, srv.URL))
+
+	res := New(cfg).Execute(context.Background(), provider.OpChat, "m", chatReq())
+	if calls != 1 {
+		t.Errorf("calls = %d, want 1", calls)
+	}
+	if res.Status != http.StatusOK {
+		t.Errorf("status = %d, want 200 (passthrough)", res.Status)
+	}
+	if !strings.Contains(string(res.Body), "PROHIBITED_CONTENT") {
+		t.Errorf("expected prohibited body returned as-is, got %s", res.Body)
+	}
+}
+
 func TestProhibitedContentAdvancesToNextTarget(t *testing.T) {
 	var blockCalls, okCalls int
 	blockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -27,6 +27,13 @@ func NewBlackout(d time.Duration) *Blackout {
 	return &Blackout{until: make(map[blackoutKey]time.Time), dur: d}
 }
 
+// SetDuration updates the blackout window used for future failures.
+func (b *Blackout) SetDuration(d time.Duration) {
+	b.mu.Lock()
+	b.dur = d
+	b.mu.Unlock()
+}
+
 // Fail marks an (API key, model) combination as blacked out for the configured
 // duration.
 func (b *Blackout) Fail(key, model string) {
