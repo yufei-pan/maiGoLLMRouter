@@ -210,10 +210,7 @@ func (r *Router) Execute(ctx context.Context, op provider.Operation, inboundMode
 
 	// Everything exhausted.
 	if last != nil && len(last.OpenAIBody) > 0 {
-		res.Status = last.HTTPStatus
-		if res.Status == 0 {
-			res.Status = http.StatusBadGateway
-		}
+		res.Status = exhaustedHTTPStatus(last)
 		res.Body = last.OpenAIBody
 	} else {
 		res.Status = http.StatusBadGateway
@@ -261,7 +258,9 @@ func (r *Router) tryKey(ctx context.Context, res *Result, p *config.Provider, mo
 		// Both an HTTP/transport error and a bad output (e.g. an HTTP 200 that
 		// carries a provider error in its body, or a response that did not
 		// finish normally) black out the normal key and move on to the next.
-		if keyType == "normal" {
+		// HTTP 400 is a client/request error, not a key/model/provider fault,
+		// so it must not black out anything.
+		if keyType == "normal" && !isHTTP400(resp) {
 			r.blackout.Fail(key, model)
 		}
 		return false, false
@@ -389,4 +388,27 @@ func maskKey(key string) string {
 
 func errorBody(msg, typ string) []byte {
 	return []byte(fmt.Sprintf(`{"error":{"message":%q,"type":%q}}`, msg, typ))
+}
+
+// exhaustedHTTPStatus picks the HTTP status returned to the inbound caller when
+// all routing attempts failed. A downstream HTTP 200 that carried a
+// content-policy block must not be forwarded as 200, or clients may treat a
+// truncated/filtered body as a normal completion.
+func exhaustedHTTPStatus(last *provider.Response) int {
+	if last.Prohibited {
+		return http.StatusForbidden
+	}
+	if last.HTTPStatus >= 200 && last.HTTPStatus < 300 {
+		return last.HTTPStatus
+	}
+	if last.HTTPStatus > 0 {
+		return last.HTTPStatus
+	}
+	return http.StatusBadGateway
+}
+
+// isHTTP400 reports a downstream Bad Request. Those are request-shaped faults,
+// not key/model/provider health issues, so they must not trigger blackout.
+func isHTTP400(resp *provider.Response) bool {
+	return resp != nil && resp.HTTPStatus == http.StatusBadRequest
 }

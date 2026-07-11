@@ -68,7 +68,7 @@ func TestIsProhibitedContent(t *testing.T) {
 		{"openai-finish-reason", `{"choices":[{"finish_reason":"PROHIBITED_CONTENT","message":{"content":""}}]}`, true},
 		{"openrouter-native-finish", `{"choices":[{"finish_reason":"content_filter","native_finish_reason":"PROHIBITED_CONTENT","message":{"content":null}}]}`, true},
 		{"content-filter-empty", `{"choices":[{"finish_reason":"content_filter","message":{"content":null}}]}`, true},
-		{"content-filter-with-body", `{"choices":[{"finish_reason":"content_filter","message":{"content":"hi"}}]}`, false},
+		{"content-filter-with-body", `{"choices":[{"finish_reason":"content_filter","message":{"content":"hi"}}]}`, true},
 		{"normal-response", `{"choices":[{"finish_reason":"stop","message":{"content":"hi"}}]}`, false},
 		{"other-error", `{"error":{"message":"rate limit exceeded","code":429}}`, false},
 		{"empty", ``, false},

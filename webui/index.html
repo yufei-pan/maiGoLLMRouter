@@ -71,8 +71,14 @@
   <span class="muted" style="font-size:13px">request logs</span>
   <span id="inflight-count" class="badge" style="display:none;color:var(--accent)"></span>
   <div class="spacer"></div>
-  <input id="f-model" type="search" placeholder="Filter by model…" autocomplete="off"
-    title="Match inbound model or served provider/model (comma = OR)" style="width:200px" />
+  <input id="f-model" type="search" placeholder="Filter by model (min 3 chars)…" autocomplete="off"
+    title="Match inbound model or served provider/model (comma = OR); needs at least 3 characters" style="width:220px" />
+  <select id="f-time" title="Time range">
+    <option value="1d" selected>Last 24 hours</option>
+    <option value="7d">Last 7 days</option>
+    <option value="30d">Last 30 days</option>
+    <option value="all">All time</option>
+  </select>
   <select id="f-status" title="Filter by outcome">
     <option value="all">All status</option>
     <option value="success">Success (2xx)</option>
@@ -123,10 +129,52 @@ const inflightById = new Map();      // id -> tr
 // filters holds the current client-side filter state. Filtering is done purely
 // in the browser over already-loaded rows; the loader keeps fetching older
 // pages so a narrow filter still fills the viewport.
-const filters = { model: '', status: 'all', endpoint: 'all' };
+const filters = { model: '', status: 'all', endpoint: 'all', timeRange: '1d' };
+let atTimeEnd = false;             // true once loaded history is older than the time filter
+
+// modelFilterActive is true when the model text box has enough input to filter.
+function modelFilterActive() {
+  return filters.model.trim().length >= 3;
+}
+
+// timeRangeCutoff returns the earliest timestamp (ms) included by the time filter,
+// or null for "all time".
+function timeRangeCutoff() {
+  const day = 24 * 60 * 60 * 1000;
+  switch (filters.timeRange) {
+    case '1d': return Date.now() - day;
+    case '7d': return Date.now() - 7 * day;
+    case '30d': return Date.now() - 30 * day;
+    default: return null;
+  }
+}
+
+function entryInTimeRange(ts) {
+  const cutoff = timeRangeCutoff();
+  if (cutoff == null) return true;
+  const t = Date.parse(ts);
+  return Number.isFinite(t) && t >= cutoff;
+}
+
+function checkTimeEnd() {
+  if (filters.timeRange === 'all') {
+    atTimeEnd = false;
+    return;
+  }
+  const cutoff = timeRangeCutoff();
+  if (cutoff != null && oldestTime != null && Date.parse(oldestTime) < cutoff) {
+    atTimeEnd = true;
+  }
+}
+
+function filtersActive() {
+  return modelFilterActive() || filters.status !== 'all' ||
+    filters.endpoint !== 'all' || filters.timeRange !== 'all';
+}
 
 // entryMatches reports whether a log index entry passes the active filters.
 function entryMatches(e) {
+  if (!entryInTimeRange(e.time)) return false;
   if (filters.status === 'success' && !(e.status >= 200 && e.status < 300)) return false;
   if (filters.status === 'error' && (e.status >= 200 && e.status < 300)) return false;
   if (filters.endpoint !== 'all' && (e.endpoint || '') !== filters.endpoint) return false;
@@ -134,10 +182,10 @@ function entryMatches(e) {
 }
 
 // modelMatches applies the model text filter to a haystack string. The query
-// supports comma-separated OR terms; an empty query matches everything.
+// supports comma-separated OR terms; fewer than 3 characters does not filter.
 function modelMatches(hay) {
   const q = filters.model.trim().toLowerCase();
-  if (!q) return true;
+  if (!modelFilterActive()) return true;
   hay = hay.toLowerCase();
   return q.split(',').map(s => s.trim()).filter(Boolean).some(term => hay.includes(term));
 }
@@ -197,6 +245,7 @@ function makeInflightRow(e) {
 // The status filter is ignored for in-flight rows since they have no final
 // status yet; current activity stays visible whenever its model/endpoint match.
 function inflightMatches(e) {
+  if (!entryInTimeRange(e.started_at)) return false;
   if (filters.endpoint !== 'all' && (e.endpoint || '') !== filters.endpoint) return false;
   return modelMatches((e.inbound_model || '') + ' ' + (e.current_target || ''));
 }
@@ -409,7 +458,7 @@ function updateEmpty() {
   if (visibleRowCount() === 0) {
     // Keep the loader pulling older pages; only declare "no matches" once the
     // whole history has been scanned for the current filter.
-    if (atEnd && !loadingOlder) {
+    if ((atEnd || atTimeEnd) && !loadingOlder) {
       emptyEl.textContent = 'No entries match the current filter.';
       emptyEl.style.display = 'block';
     } else {
@@ -504,8 +553,7 @@ async function loadInitial() {
     ]);
     const data = await logsRes.json();
     addEntries(data.entries || [], 'bottom');
-    updateEmpty();
-    maybeLoadMore();
+    applyFilters();
   } catch (err) {
     emptyEl.style.display = 'block';
     emptyEl.textContent = 'Failed to load logs: ' + err;
@@ -550,6 +598,7 @@ async function loadOlder() {
   } catch (err) { /* transient; another scroll retries */ }
   finally {
     loadingOlder = false;
+    checkTimeEnd();
     maybeLoadMore();
   }
 }
@@ -559,10 +608,10 @@ async function loadOlder() {
 // most rows (so a narrow filter still fills the screen) and until the page is
 // tall enough to scroll at all.
 function maybeLoadMore() {
-  if (atEnd || loadingOlder) return;
+  if (atEnd || atTimeEnd || loadingOlder) return;
   const se = scroller();
   const below = se.scrollHeight - se.scrollTop - se.clientHeight;
-  const filtering = filters.model || filters.status !== 'all' || filters.endpoint !== 'all';
+  const filtering = filtersActive();
   // When filtering, the visible buffer can be tiny even with many rows loaded,
   // so keep paging until either the buffer is full or the history is exhausted.
   if (below < PRELOAD_PX || (filtering && se.scrollHeight <= se.clientHeight)) loadOlder();
@@ -618,9 +667,11 @@ refreshBtn.addEventListener('contextmenu', (e) => e.preventDefault()); // no men
 
 // --- Client-side filtering -------------------------------------------------
 const fModel = document.getElementById('f-model');
+const fTime = document.getElementById('f-time');
 const fStatus = document.getElementById('f-status');
 const fEndpoint = document.getElementById('f-endpoint');
 const fClear = document.getElementById('f-clear');
+const MODEL_FILTER_DEBOUNCE_MS = 2000;
 const knownEndpoints = new Set();
 
 // registerEndpoint adds any newly seen endpoint to the endpoint filter dropdown
@@ -643,25 +694,32 @@ function applyFilters() {
   for (const tr of inflightById.values()) {
     if (tr._entry) applyInflightRowFilter(tr, tr._entry);
   }
+  checkTimeEnd();
   updateEmpty();
   maybeLoadMore();
 }
 
-let filterTimer = null;
+let modelFilterTimer = null;
 function onFilterChange() {
   filters.model = fModel.value;
   filters.status = fStatus.value;
   filters.endpoint = fEndpoint.value;
+  filters.timeRange = fTime.value;
+  atTimeEnd = false;
   applyFilters();
 }
 fModel.addEventListener('input', () => {
-  clearTimeout(filterTimer);
-  filterTimer = setTimeout(onFilterChange, 120);
+  clearTimeout(modelFilterTimer);
+  modelFilterTimer = setTimeout(onFilterChange, MODEL_FILTER_DEBOUNCE_MS);
 });
+fTime.addEventListener('change', onFilterChange);
 fStatus.addEventListener('change', onFilterChange);
 fEndpoint.addEventListener('change', onFilterChange);
 fClear.addEventListener('click', () => {
+  clearTimeout(modelFilterTimer);
+  modelFilterTimer = null;
   fModel.value = '';
+  fTime.value = '1d';
   fStatus.value = 'all';
   fEndpoint.value = 'all';
   onFilterChange();

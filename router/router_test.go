@@ -34,7 +34,8 @@ func bearer(r *http.Request) string {
 }
 
 const chatStop = `{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}]}`
-const chatBad = `{"choices":[{"finish_reason":"content_filter","message":{"role":"assistant","content":"hi"}}]}`
+const chatBadFinish = `{"choices":[{"finish_reason":"unexpected","message":{"role":"assistant","content":"hi"}}]}`
+const chatContentFilter = `{"choices":[{"finish_reason":"content_filter","message":{"role":"assistant","content":"hi"}}]}`
 
 func chatReq() map[string]any {
 	return map[string]any{
@@ -116,6 +117,53 @@ targets = ["openai/real-model"]
 	}
 }
 
+// TestHTTP400DoesNotBlackout verifies a downstream HTTP 400 (client/request
+// error) is not treated as a key/model/provider fault: normal keys stay usable.
+func TestHTTP400DoesNotBlackout(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"error":{"message":"bad request","type":"invalid_request_error"}}`)
+	}))
+	defer srv.Close()
+
+	cfg := loadCfg(t, fmt.Sprintf(`
+[[provider]]
+name = "openai"
+kind = "openai"
+base_url = %q
+keys = ["n1","n2"]
+fallback_keys = ["f1"]
+
+[model."m"]
+targets = ["openai/real-model"]
+`, srv.URL))
+
+	r := New(cfg)
+	res := r.Execute(context.Background(), provider.OpChat, "m", chatReq())
+	if res.Success {
+		t.Fatal("expected non-success for HTTP 400")
+	}
+	if res.Status != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", res.Status)
+	}
+	if r.blackout.Blocked("n1", "real-model") || r.blackout.Blocked("n2", "real-model") {
+		t.Errorf("HTTP 400 must not black out normal keys for the model")
+	}
+	if r.blackout.Blocked("f1", "real-model") {
+		t.Errorf("fallback key must never be blacked out")
+	}
+	for _, a := range res.Attempts {
+		if a.Outcome == "skipped_blackout" {
+			t.Errorf("unexpected blackout skip after HTTP 400: %+v", a)
+		}
+	}
+	if calls < 1 {
+		t.Errorf("expected at least one downstream call, got %d", calls)
+	}
+}
+
 func TestFallbackModelsGating(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(bearer(r), "n") {
@@ -158,7 +206,7 @@ func TestBadOutputDoesNotRetrySameKey(t *testing.T) {
 	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
-		fmt.Fprint(w, chatBad) // finish_reason not in good set => bad output
+		fmt.Fprint(w, chatBadFinish) // finish_reason not in good set => bad output
 	}))
 	defer srv.Close()
 
@@ -192,6 +240,44 @@ targets = ["openai/real-model"]
 	}
 	if !r.blackout.Blocked("n1", "real-model") {
 		t.Errorf("bad output should black out the normal key like a provider error")
+	}
+}
+
+func TestContentFilterTreatedAsProhibited(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		fmt.Fprint(w, chatContentFilter)
+	}))
+	defer srv.Close()
+
+	cfg := loadCfg(t, fmt.Sprintf(`
+[[provider]]
+name = "openai"
+kind = "openai"
+base_url = %q
+keys = ["n1"]
+
+[model."m"]
+targets = ["openai/real-model"]
+`, srv.URL))
+
+	r := New(cfg)
+	res := r.Execute(context.Background(), provider.OpChat, "m", chatReq())
+	if res.Success {
+		t.Fatal("expected non-success for content_filter")
+	}
+	if calls != 1 {
+		t.Errorf("calls = %d, want 1 (no same-key retry)", calls)
+	}
+	if len(res.Attempts) != 1 || res.Attempts[0].Outcome != "prohibited_content" {
+		t.Fatalf("unexpected attempts: %+v", res.Attempts)
+	}
+	if res.Status != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 (content_filter must not passthrough as 200)", res.Status)
+	}
+	if r.blackout.Blocked("n1", "real-model") {
+		t.Errorf("content_filter is a policy block, must not black out the key")
 	}
 }
 
@@ -618,8 +704,8 @@ targets = ["openrouter/google/gemma-4-31b-it:free"]
 	if calls != 1 {
 		t.Errorf("calls = %d, want 1", calls)
 	}
-	if res.Status != http.StatusOK {
-		t.Errorf("status = %d, want 200 (passthrough)", res.Status)
+	if res.Status != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 (policy block must not passthrough as 200)", res.Status)
 	}
 	if !strings.Contains(string(res.Body), "PROHIBITED_CONTENT") {
 		t.Errorf("expected prohibited body returned as-is, got %s", res.Body)

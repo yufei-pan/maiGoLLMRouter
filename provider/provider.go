@@ -119,22 +119,13 @@ func isProhibitedContent(raw []byte) bool {
 		if matchesProhibited(c.FinishReason) || matchesProhibited(c.NativeFinishReason) {
 			return true
 		}
-		if isContentFilterFinish(c.FinishReason) && !messageHasContent(c.Message.Content) {
+		// Any content_filter finish is a policy block, even when partial content
+		// was emitted before the provider cut off the response.
+		if isContentFilterFinish(c.FinishReason) {
 			return true
 		}
 	}
 	return false
-}
-
-func messageHasContent(raw json.RawMessage) bool {
-	if len(raw) == 0 || string(raw) == "null" {
-		return false
-	}
-	var s string
-	if err := json.Unmarshal(raw, &s); err == nil {
-		return s != ""
-	}
-	return true
 }
 
 func isContentFilterFinish(s string) bool {
