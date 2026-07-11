@@ -61,9 +61,9 @@ type Server struct {
 	ClientKeys        []string
 	GlobalBlackout    time.Duration
 	// MaxRetries is deprecated and no longer has any effect: a key is never
-	// retried in place. A bad output now blacks out the key and advances to the
-	// next key, exactly like a provider error. The field is retained so existing
-	// configs that still set max_retries continue to load without error.
+	// retried in place. A bad output advances to the next key without blackout;
+	// a provider error blacks out the key and advances. The field is retained so
+	// existing configs that still set max_retries continue to load without error.
 	MaxRetries        int
 	GoodFinishReasons map[string]bool
 

@@ -111,7 +111,7 @@ See `[config.example.toml](config.example.toml)` for a fully commented example.
 | `log_dir`             | Directory for JSONL logs (default `./logs`).                                                               |
 | `client_keys`         | Accepted inbound bearer tokens. **If empty, a random key is generated at startup and printed to the log.** |
 | `global_blackout`     | Duration a failed normal (key, model) combination is skipped (default `60s`).                              |
-| `max_retries`         | Deprecated, no-op. A key is never retried in place; a bad output now blacks out the key and moves on, like a provider error. Kept only so old configs still load. |
+| `max_retries`         | Deprecated, no-op. A key is never retried in place; a bad output moves on without blackout, while a provider error blacks out the key. Kept only so old configs still load. |
 | `good_finish_reasons` | Normalized finish reasons treated as success.                                                              |
 | `config_reload_interval` | Poll interval for automatic config reload (default `3s`). Set to `0` to disable polling; `SIGHUP` / `systemctl reload` still reloads. |
 | `log_retention_days`  | Days to keep detail logs (default 60). `0` disables cleanup. Requires restart to change at runtime.        |
@@ -221,8 +221,8 @@ for each target in order:
     shuffle the provider's normal keys
     for each non-blacked-out key:
         call; on transport/HTTP error -> blackout (key, model), next key
-              on bad/unfinished output (incl. HTTP 200 with an error body)
-                  -> treated like a provider error: blackout (key, model), next key
+              on bad/unfinished output (empty content, bad finish reason)
+                  -> next key, no blackout
               on success -> return
 
 # Phase 2 — fallback round

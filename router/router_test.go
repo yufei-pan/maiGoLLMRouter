@@ -199,9 +199,10 @@ targets = ["openai/real-model"]
 	}
 }
 
-// TestBadOutputDoesNotRetrySameKey verifies a bad output is treated like a
-// provider error: the same key is never retried in place (which would burn the
-// key's rate limit), and the normal key is blacked out before moving on.
+// TestBadOutputDoesNotRetrySameKey verifies a bad output never retries the
+// same key in place (which would burn the key's rate limit), and does not
+// black out the key — empty/unfinished HTTP 200 bodies are not a key-health
+// signal.
 func TestBadOutputDoesNotRetrySameKey(t *testing.T) {
 	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -238,8 +239,8 @@ targets = ["openai/real-model"]
 	if badOutputs != 1 {
 		t.Errorf("bad_output attempts = %d, want 1", badOutputs)
 	}
-	if !r.blackout.Blocked("n1", "real-model") {
-		t.Errorf("bad output should black out the normal key like a provider error")
+	if r.blackout.Blocked("n1", "real-model") {
+		t.Errorf("bad output must not black out the normal key")
 	}
 }
 

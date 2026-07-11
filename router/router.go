@@ -225,10 +225,11 @@ func (r *Router) Execute(ctx context.Context, op provider.Operation, inboundMode
 // a content-policy block, signaling the caller to skip the combo's remaining
 // keys and advance to the next target/fallback without blacking out the key.
 //
-// A key is never retried in place. A bad output is treated exactly like a
-// provider error (see callOnce): both black out the normal key and advance to
-// the next key. Retrying the same key would burn the key's rate limit (RPM)
-// without changing a deterministic-looking failure, so the router moves on.
+// A key is never retried in place. A bad output advances to the next key
+// without blackout (empty/unfinished HTTP 200 bodies are not a key-health
+// signal). A provider error blacks out the normal key and advances. Retrying
+// the same key would burn the key's rate limit (RPM) without changing a
+// deterministic-looking failure, so the router moves on.
 func (r *Router) tryKey(ctx context.Context, res *Result, p *config.Provider, model string, op provider.Operation, body map[string]any, key, keyType string, last **provider.Response) (done, skip bool) {
 	resp, att, oc := r.callOnce(ctx, p, model, op, body, key, keyType)
 	res.Attempts = append(res.Attempts, att)
@@ -254,10 +255,12 @@ func (r *Router) tryKey(ctx context.Context, res *Result, p *config.Provider, mo
 		// this combo is futile and not a provider/key fault, so skip the
 		// combo without blacking out the key.
 		return false, true
-	default: // outcomeProviderError and outcomeBadOutput
-		// Both an HTTP/transport error and a bad output (e.g. an HTTP 200 that
-		// carries a provider error in its body, or a response that did not
-		// finish normally) black out the normal key and move on to the next.
+	case outcomeBadOutput:
+		// HTTP 200 with empty/unfinished output: try the next key, but do not
+		// black out — this is not a reliable key/model health signal.
+		return false, false
+	default: // outcomeProviderError
+		// Transport/HTTP errors black out the normal key and move on.
 		// HTTP 400 is a client/request error, not a key/model/provider fault,
 		// so it must not black out anything.
 		if keyType == "normal" && !isHTTP400(resp) {
@@ -328,7 +331,7 @@ func (r *Router) callOnce(ctx context.Context, p *config.Provider, model string,
 	if strings.EqualFold(resp.FinishReason, "length") {
 		detail = " (response truncated by max output tokens)"
 	}
-	log.Printf("WARNING: output did not finish normally: provider=%s model=%s key=%s finish_reason=%s%s — blacking out key and moving on",
+	log.Printf("WARNING: output did not finish normally: provider=%s model=%s key=%s finish_reason=%s%s — moving on without blackout",
 		p.Name, model, maskKey(key), reason, detail)
 	return resp, att, outcomeBadOutput
 }
