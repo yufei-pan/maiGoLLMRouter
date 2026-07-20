@@ -51,6 +51,8 @@ func (r *Response) OK() bool {
 // transport-level failure (no usable HTTP response); HTTP error statuses are
 // reported via Response.HTTPStatus with a nil error.
 func Call(ctx context.Context, client *http.Client, kind, baseURL, apiKey string, req Request) (*Response, error) {
+	req = withClaudeTrailingUserCoercion(req)
+
 	var resp *Response
 	var err error
 	switch kind {
@@ -67,6 +69,56 @@ func Call(ctx context.Context, client *http.Client, kind, baseURL, apiKey string
 		resp.Prohibited = true
 	}
 	return resp, err
+}
+
+// resolvedModelLeaf returns the last path segment of a possibly proxied model
+// name (e.g. "a/b/claude-3" -> "claude-3").
+func resolvedModelLeaf(model string) string {
+	if i := strings.LastIndex(model, "/"); i >= 0 {
+		return model[i+1:]
+	}
+	return model
+}
+
+// isClaudeModelName reports whether the resolved downstream model is a Claude
+// model, including names wrapped by intermediate proxy prefixes.
+func isClaudeModelName(model string) bool {
+	leaf := resolvedModelLeaf(model)
+	return strings.HasPrefix(leaf, "claude-") || strings.HasPrefix(leaf, "anthropic.claude-")
+}
+
+// withClaudeTrailingUserCoercion returns a request whose last chat message is
+// role "user" when the resolved model is Claude. Downstream Anthropic (and
+// OpenAI-style proxies that translate to it) reject assistant prefill.
+// Applied for every outbound dialect; the shared inbound body is not mutated.
+func withClaudeTrailingUserCoercion(req Request) Request {
+	if req.Op != OpChat || !isClaudeModelName(req.Model) {
+		return req
+	}
+	msgs, ok := req.Body["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		return req
+	}
+	last, ok := msgs[len(msgs)-1].(map[string]any)
+	if !ok || asString(last, "role") == "user" {
+		return req
+	}
+
+	copiedLast := make(map[string]any, len(last)+1)
+	for k, v := range last {
+		copiedLast[k] = v
+	}
+	copiedLast["role"] = "user"
+	copiedMsgs := append([]any(nil), msgs...)
+	copiedMsgs[len(copiedMsgs)-1] = copiedLast
+
+	body := make(map[string]any, len(req.Body))
+	for k, v := range req.Body {
+		body[k] = v
+	}
+	body["messages"] = copiedMsgs
+	req.Body = body
+	return req
 }
 
 // ProhibitedContentMarker is the sentinel a downstream emits when it refuses a
