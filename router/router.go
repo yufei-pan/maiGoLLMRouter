@@ -23,6 +23,7 @@ type Router struct {
 	cfg      *config.Config
 	blackout *Blackout
 	clients  map[string]*http.Client
+	respCaps *responsesCapability
 }
 
 // New builds a Router from the resolved configuration.
@@ -31,6 +32,7 @@ func New(cfg *config.Config) *Router {
 		cfg:      cfg,
 		blackout: NewBlackout(cfg.Server.GlobalBlackout),
 		clients:  make(map[string]*http.Client, len(cfg.Providers)),
+		respCaps: newResponsesCapability(),
 	}
 	for name, p := range cfg.Providers {
 		r.clients[name] = &http.Client{Timeout: p.Timeout}
@@ -39,7 +41,7 @@ func New(cfg *config.Config) *Router {
 }
 
 // Reload replaces routing configuration and rebuilds provider HTTP clients.
-// In-flight blackout state is preserved.
+// In-flight blackout state is preserved; learned Responses capabilities are not.
 func (r *Router) Reload(cfg *config.Config) {
 	clients := make(map[string]*http.Client, len(cfg.Providers))
 	for name, p := range cfg.Providers {
@@ -50,6 +52,9 @@ func (r *Router) Reload(cfg *config.Config) {
 	r.clients = clients
 	r.mu.Unlock()
 	r.blackout.SetDuration(cfg.Server.GlobalBlackout)
+	// Base URLs and supports_responses may have changed, so learned Responses
+	// verdicts no longer describe the current downstreams.
+	r.respCaps.Clear()
 }
 
 // Attempt records a single downstream call for logging.
@@ -84,9 +89,13 @@ const (
 	outcomeSuccess outcome = iota
 	outcomeBadOutput
 	outcomeProviderError
-	outcomeCanceled   // inbound request context canceled (caller went away)
-	outcomeProhibited // downstream blocked the content (deterministic policy decision)
+	outcomeCanceled     // inbound request context canceled (caller went away)
+	outcomeProhibited   // downstream blocked the content (deterministic policy decision)
+	outcomeIncompatible // Responses body cannot be served over this provider's dialect
 )
+
+// attemptIncompatible is the Attempt.Outcome recorded for outcomeIncompatible.
+const attemptIncompatible = "incompatible"
 
 // Resolve maps an inbound model name to an ordered list of targets (#12,#14,#15).
 func (r *Router) Resolve(model string) ([]config.Target, error) {
@@ -208,7 +217,13 @@ func (r *Router) Execute(ctx context.Context, op provider.Operation, inboundMode
 		}
 	}
 
-	// Everything exhausted.
+	// Everything exhausted. When no target could even accept the request, the
+	// fault is in the request, not in the providers.
+	if onlyIncompatible(res.Attempts) {
+		res.Status = http.StatusBadRequest
+		res.Body = errorBody("this request uses Responses-only features that no configured target for this model can serve; route it to a provider with a /responses route", "invalid_request_error")
+		return res
+	}
 	if last != nil && len(last.OpenAIBody) > 0 {
 		res.Status = exhaustedHTTPStatus(last)
 		res.Body = last.OpenAIBody
@@ -250,6 +265,11 @@ func (r *Router) tryKey(ctx context.Context, res *Result, p *config.Provider, mo
 		res.Status = 499 // "Client Closed Request" (nginx convention)
 		res.Body = errorBody("request canceled by caller", "request_canceled")
 		return true, false
+	case outcomeIncompatible:
+		// The provider cannot express this Responses body at all. Nothing was
+		// sent, so there is no key or provider fault to record: move on to the
+		// next key/target, which may be Responses-capable.
+		return false, false
 	case outcomeProhibited:
 		// Deterministic content-policy block: retrying with other keys for
 		// this combo is futile and not a provider/key fault, so skip the
@@ -274,13 +294,16 @@ func (r *Router) callOnce(ctx context.Context, p *config.Provider, model string,
 	att := Attempt{Provider: p.Name, Model: model, Key: maskKey(key), KeyType: keyType}
 	start := time.Now()
 	resp, err := provider.Call(ctx, r.clients[p.Name], p.Kind, p.BaseURL, key, provider.Request{
-		Op: op, Model: model, Body: body,
+		Op: op, Model: model, Body: body, ResponsesMode: r.responsesMode(p, op),
 	})
 	att.LatencyMS = time.Since(start).Milliseconds()
 	if resp != nil {
 		att.HTTPStatus = resp.HTTPStatus
 		att.FinishReason = resp.FinishReason
 		att.OutboundURL = resp.OutboundURL
+	}
+	if resp != nil && resp.LearnChatOnly {
+		r.respCaps.MarkChatOnly(p.Name)
 	}
 
 	// If the inbound request context is done, the caller disconnected or hit its
@@ -290,6 +313,15 @@ func (r *Router) callOnce(ctx context.Context, p *config.Provider, model string,
 		att.Outcome = "canceled"
 		att.Error = ctx.Err().Error()
 		return resp, att, outcomeCanceled
+	}
+
+	// A non-portable Responses body is a property of the request and the
+	// provider's dialect, so no HTTP call was made and none of the error/output
+	// checks below apply.
+	if resp != nil && resp.Incompatible {
+		att.Outcome = attemptIncompatible
+		att.Error = "responses request not portable to this provider"
+		return resp, att, outcomeIncompatible
 	}
 
 	// A content-policy block is a deterministic output, even when delivered with
@@ -345,7 +377,47 @@ func (r *Router) outputOK(op provider.Operation, resp *provider.Response) bool {
 	if !resp.HasContent {
 		return false
 	}
+	if op == provider.OpResponses && resp.FinishReason == "" {
+		// A Responses reply that could not be normalized (unparseable body, or a
+		// chat reply that failed to wrap) carries no finish reason to verify.
+		return false
+	}
 	return r.cfg.Server.GoodFinishReasons[strings.ToLower(resp.FinishReason)]
+}
+
+// responsesMode decides how an OpResponses request should reach the provider:
+// explicit config wins, then the probe cache, otherwise probe and learn.
+func (r *Router) responsesMode(p *config.Provider, op provider.Operation) provider.ResponsesMode {
+	if op != provider.OpResponses {
+		return provider.ResponsesModeProbe
+	}
+	if p.SupportsResponses != nil {
+		if *p.SupportsResponses {
+			return provider.ResponsesModeForce
+		}
+		return provider.ResponsesModeChatOnly
+	}
+	if r.respCaps.IsChatOnly(p.Name) {
+		return provider.ResponsesModeChatOnly
+	}
+	return provider.ResponsesModeProbe
+}
+
+// onlyIncompatible reports whether every attempt that reached a provider was
+// rejected as non-portable. Blackout skips never reached a provider, so they
+// do not count either way; at least one real incompatible attempt is required.
+func onlyIncompatible(attempts []Attempt) bool {
+	found := false
+	for _, a := range attempts {
+		switch a.Outcome {
+		case "skipped_blackout":
+		case attemptIncompatible:
+			found = true
+		default:
+			return false
+		}
+	}
+	return found
 }
 
 func shuffledKeys(keys []string) []string {

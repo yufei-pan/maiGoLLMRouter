@@ -327,6 +327,240 @@ targets = ["openai/real-model"]
 	}
 }
 
+func responsesReq() map[string]any {
+	return map[string]any{"model": "ignored", "input": "hi"}
+}
+
+// responsesProbeServer answers /responses with a 404 (no such route) and
+// /chat/completions with a normal completion, recording every path it served.
+func responsesProbeServer(t *testing.T, paths *[]string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*paths = append(*paths, r.URL.Path)
+		if r.URL.Path == "/responses" {
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"error":{"message":"not found"}}`)
+			return
+		}
+		fmt.Fprint(w, chatStop)
+	}))
+}
+
+// TestResponsesProbeResultIsCached verifies the router probes /responses once
+// per provider and reuses the learned chat-only verdict for later requests.
+func TestResponsesProbeResultIsCached(t *testing.T) {
+	var paths []string
+	srv := responsesProbeServer(t, &paths)
+	defer srv.Close()
+
+	cfg := loadCfg(t, fmt.Sprintf(`
+[[provider]]
+name = "openai"
+kind = "openai"
+base_url = %q
+keys = ["n1"]
+
+[model."m"]
+targets = ["openai/real-model"]
+`, srv.URL))
+
+	r := New(cfg)
+	res := r.Execute(context.Background(), provider.OpResponses, "m", responsesReq())
+	if !res.Success {
+		t.Fatalf("expected success via chat fallback, attempts=%+v", res.Attempts)
+	}
+	want := []string{"/responses", "/chat/completions"}
+	if len(paths) != len(want) || paths[0] != want[0] || paths[1] != want[1] {
+		t.Fatalf("first request paths = %v, want %v", paths, want)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(res.Body, &parsed); err != nil {
+		t.Fatalf("body is not JSON: %v", err)
+	}
+	if parsed["object"] != "response" {
+		t.Errorf("client body not Responses-shaped: %s", res.Body)
+	}
+
+	paths = nil
+	res = r.Execute(context.Background(), provider.OpResponses, "m", responsesReq())
+	if !res.Success {
+		t.Fatalf("expected success on cached chat-only path, attempts=%+v", res.Attempts)
+	}
+	if len(paths) != 1 || paths[0] != "/chat/completions" {
+		t.Fatalf("second request paths = %v, want [/chat/completions] (cache not used)", paths)
+	}
+}
+
+// TestResponsesReloadClearsCapabilityCache verifies a config reload forgets the
+// learned chat-only verdict so a provider that gained /responses is probed again.
+func TestResponsesReloadClearsCapabilityCache(t *testing.T) {
+	var paths []string
+	srv := responsesProbeServer(t, &paths)
+	defer srv.Close()
+
+	content := fmt.Sprintf(`
+[[provider]]
+name = "openai"
+kind = "openai"
+base_url = %q
+keys = ["n1"]
+
+[model."m"]
+targets = ["openai/real-model"]
+`, srv.URL)
+
+	r := New(loadCfg(t, content))
+	if res := r.Execute(context.Background(), provider.OpResponses, "m", responsesReq()); !res.Success {
+		t.Fatalf("expected success via chat fallback, attempts=%+v", res.Attempts)
+	}
+
+	r.Reload(loadCfg(t, content))
+
+	paths = nil
+	if res := r.Execute(context.Background(), provider.OpResponses, "m", responsesReq()); !res.Success {
+		t.Fatalf("expected success after reload, attempts=%+v", res.Attempts)
+	}
+	if len(paths) != 2 || paths[0] != "/responses" {
+		t.Fatalf("after reload paths = %v, want a fresh /responses probe first", paths)
+	}
+}
+
+// TestResponsesIncompatibleEverywhereReturns400 verifies a Responses body using
+// Responses-only features against chat-only providers is reported as a client
+// error rather than an upstream failure, and never blacks out a key.
+func TestResponsesIncompatibleEverywhereReturns400(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		t.Errorf("unexpected downstream call to %s for a non-portable body", r.URL.Path)
+	}))
+	defer srv.Close()
+
+	cfg := loadCfg(t, fmt.Sprintf(`
+[[provider]]
+name = "openai"
+kind = "openai"
+base_url = %q
+keys = ["n1","n2"]
+fallback_keys = ["f1"]
+supports_responses = false
+
+[model."m"]
+targets = ["openai/real-model"]
+`, srv.URL))
+
+	body := responsesReq()
+	body["tools"] = []any{map[string]any{"type": "web_search"}}
+
+	r := New(cfg)
+	res := r.Execute(context.Background(), provider.OpResponses, "m", body)
+	if res.Success {
+		t.Fatal("expected non-success for a non-portable Responses body")
+	}
+	if calls != 0 {
+		t.Errorf("calls = %d, want 0 (nothing portable to send)", calls)
+	}
+	if res.Status != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", res.Status)
+	}
+	if !strings.Contains(string(res.Body), "Responses") {
+		t.Errorf("expected an explanatory Responses error body, got %s", res.Body)
+	}
+	if len(res.Attempts) != 3 {
+		t.Fatalf("attempts = %d, want 3 (both normal keys and the fallback key)", len(res.Attempts))
+	}
+	for _, a := range res.Attempts {
+		if a.Outcome != "incompatible" {
+			t.Errorf("unexpected attempt outcome: %+v", a)
+		}
+	}
+	if r.blackout.Blocked("n1", "real-model") || r.blackout.Blocked("n2", "real-model") {
+		t.Errorf("an incompatible request is not a key fault, must not black out")
+	}
+}
+
+// TestResponsesIncompatibleAdvancesToCapableProvider verifies an incompatible
+// target does not end the run: a Responses-capable provider still gets a turn.
+func TestResponsesIncompatibleAdvancesToCapableProvider(t *testing.T) {
+	var okCalls int
+	okSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		okCalls++
+		fmt.Fprint(w, `{"id":"r1","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"hi"}]}]}`)
+	}))
+	defer okSrv.Close()
+
+	cfg := loadCfg(t, fmt.Sprintf(`
+[[provider]]
+name = "chatonly"
+kind = "openai"
+base_url = "http://127.0.0.1:0"
+keys = ["c1"]
+supports_responses = false
+
+[[provider]]
+name = "native"
+kind = "openai"
+base_url = %q
+keys = ["g1"]
+supports_responses = true
+
+[model."m"]
+targets = ["chatonly/real-model", "native/real-model"]
+`, okSrv.URL))
+
+	body := responsesReq()
+	body["tools"] = []any{map[string]any{"type": "web_search"}}
+
+	res := New(cfg).Execute(context.Background(), provider.OpResponses, "m", body)
+	if !res.Success {
+		t.Fatalf("expected success via the Responses-capable provider, attempts=%+v", res.Attempts)
+	}
+	if res.Provider != "native" {
+		t.Errorf("served by %q, want native", res.Provider)
+	}
+	if okCalls != 1 {
+		t.Errorf("native calls = %d, want 1", okCalls)
+	}
+}
+
+// TestResponsesUnwrappableChatReplyIsBadOutput verifies a chat reply that cannot
+// be wrapped into a Responses object is a bad output (an HTTP 200 with no usable
+// body), not a success.
+func TestResponsesUnwrappableChatReplyIsBadOutput(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/responses" {
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"error":{"message":"not found"}}`)
+			return
+		}
+		fmt.Fprint(w, `not-json-at-all`)
+	}))
+	defer srv.Close()
+
+	cfg := loadCfg(t, fmt.Sprintf(`
+[[provider]]
+name = "openai"
+kind = "openai"
+base_url = %q
+keys = ["n1"]
+
+[model."m"]
+targets = ["openai/real-model"]
+`, srv.URL))
+
+	r := New(cfg)
+	res := r.Execute(context.Background(), provider.OpResponses, "m", responsesReq())
+	if res.Success {
+		t.Fatal("expected non-success: the chat reply could not be wrapped as a Responses object")
+	}
+	if len(res.Attempts) != 1 || res.Attempts[0].Outcome != "bad_output" {
+		t.Fatalf("unexpected attempts: %+v", res.Attempts)
+	}
+	if r.blackout.Blocked("n1", "real-model") {
+		t.Errorf("bad output must not black out the normal key")
+	}
+}
+
 func mustResolve(t *testing.T, r *Router, model string) config.Target {
 	t.Helper()
 	got, err := r.Resolve(model)
