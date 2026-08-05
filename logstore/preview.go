@@ -11,8 +11,9 @@ import (
 const DefaultRequestPreviewLen = 16
 
 // RequestContentPreview extracts a short plain-text preview from an inbound
-// request body: the first message content for chat, or the input field for
-// embeddings. Returns empty when nothing recognizable is present.
+// request body: the first message content for chat, the first Responses input
+// item with text, or the input field for embeddings. Returns empty when
+// nothing recognizable is present.
 func RequestContentPreview(req json.RawMessage, maxLen int) string {
 	if len(req) == 0 || maxLen <= 0 {
 		return ""
@@ -44,7 +45,7 @@ func EstimateInTokens(req json.RawMessage) int {
 		chars += allMessageTextRunes(raw)
 	}
 	if raw, ok := body["input"]; ok {
-		chars += utf8.RuneCountInString(jsonInputText(raw))
+		chars += allInputTextRunes(raw)
 	}
 	if chars == 0 {
 		return 0
@@ -53,6 +54,12 @@ func EstimateInTokens(req json.RawMessage) int {
 		var msgs []json.RawMessage
 		if err := json.Unmarshal(raw, &msgs); err == nil {
 			chars += len(msgs) * 4 // rough per-message overhead
+		}
+	}
+	if raw, ok := body["input"]; ok {
+		var items []json.RawMessage
+		if err := json.Unmarshal(raw, &items); err == nil {
+			chars += len(items) * 4
 		}
 	}
 	return (chars + 3) / 4
@@ -142,13 +149,69 @@ func jsonInputText(raw json.RawMessage) string {
 	if err := json.Unmarshal(raw, &items); err != nil {
 		return ""
 	}
-	var b strings.Builder
+	// Embeddings: array of strings — concatenate (existing behavior).
+	var stringParts strings.Builder
+	allStrings := true
 	for _, item := range items {
-		if s, ok := parseJSONString(item); ok {
-			b.WriteString(s)
+		s, ok := parseJSONString(item)
+		if !ok {
+			allStrings = false
+			break
+		}
+		stringParts.WriteString(s)
+	}
+	if allStrings && len(items) > 0 {
+		return stringParts.String()
+	}
+	// Responses: array of role/typed items — first non-empty content, matching
+	// textFromMessages (chat) so the UI preview is not blank.
+	for _, item := range items {
+		if text := responsesInputItemText(item); text != "" {
+			return text
 		}
 	}
-	return b.String()
+	return ""
+}
+
+// allInputTextRunes sums text across an embeddings string/array or Responses
+// input item list for live in-token estimates.
+func allInputTextRunes(raw json.RawMessage) int {
+	if text := jsonContentText(raw); text != "" {
+		return utf8.RuneCountInString(text)
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return 0
+	}
+	n := 0
+	for _, item := range items {
+		if s, ok := parseJSONString(item); ok {
+			n += utf8.RuneCountInString(s)
+			continue
+		}
+		n += utf8.RuneCountInString(responsesInputItemText(item))
+	}
+	return n
+}
+
+// responsesInputItemText extracts plain text from one Responses input item
+// (role message with content string/parts, or function_call_output.output).
+func responsesInputItemText(raw json.RawMessage) string {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return ""
+	}
+	if c, ok := m["content"]; ok {
+		if text := jsonContentText(c); text != "" {
+			return text
+		}
+	}
+	if o, ok := m["output"]; ok {
+		if s, ok := parseJSONString(o); ok {
+			return s
+		}
+	}
+	return ""
 }
 
 func truncateRunes(s string, maxLen int) string {

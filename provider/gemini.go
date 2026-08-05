@@ -17,6 +17,7 @@ var geminiConsumed = map[string]bool{
 	"max_completion_tokens": true, "stop": true, "n": true,
 	"encoding_format": true, "dimensions": true, "user": true,
 	"tools": true, "tool_choice": true, "functions": true, "function_call": true,
+	"response_format": true,
 }
 
 // geminiTopLevel lists generateContent request fields that belong at the top
@@ -101,7 +102,7 @@ func buildGeminiChatBody(req Request) map[string]any {
 				"parts": []map[string]any{toolResponsePart(mm, text, toolNames)},
 			})
 		default: // user
-			contents = append(contents, map[string]any{"role": "user", "parts": []map[string]any{{"text": text}}})
+			contents = append(contents, map[string]any{"role": "user", "parts": geminiUserParts(mm["content"])})
 		}
 	}
 
@@ -129,6 +130,7 @@ func buildGeminiChatBody(req Request) map[string]any {
 			genCfg["stopSequences"] = s
 		}
 	}
+	applyGeminiResponseFormat(genCfg, req.Body["response_format"])
 	// Passthrough of unknown args. Known top-level request fields (tools,
 	// safetySettings, etc.) go to the body root; an explicit generationConfig is
 	// merged into ours; everything else falls into generationConfig.
@@ -194,6 +196,76 @@ func collectToolCallNames(msgs []any) map[string]string {
 		}
 	}
 	return names
+}
+
+// geminiUserParts converts OpenAI user content (string or parts, including
+// image_url) into Gemini parts. Text-only content stays a single text part.
+func geminiUserParts(content any) []map[string]any {
+	parts := openAIContentParts(content)
+	if len(parts) == 0 {
+		return []map[string]any{{"text": contentToText(content)}}
+	}
+	out := make([]map[string]any, 0, len(parts))
+	for _, p := range parts {
+		switch asString(p, "type") {
+		case "text", "":
+			if t := asString(p, "text"); t != "" {
+				out = append(out, map[string]any{"text": t})
+			}
+		case "image_url":
+			if block := geminiImagePart(p["image_url"]); block != nil {
+				out = append(out, block)
+			}
+		}
+	}
+	if len(out) == 0 {
+		return []map[string]any{{"text": contentToText(content)}}
+	}
+	return out
+}
+
+func geminiImagePart(imageURL any) map[string]any {
+	url, mediaType, data, ok := parseImageURL(imageURL)
+	if !ok {
+		return nil
+	}
+	if data != "" {
+		if mediaType == "" {
+			mediaType = "image/png"
+		}
+		return map[string]any{"inlineData": map[string]any{
+			"mimeType": mediaType,
+			"data":     data,
+		}}
+	}
+	return map[string]any{"fileData": map[string]any{
+		"fileUri": url,
+	}}
+}
+
+// applyGeminiResponseFormat maps OpenAI response_format into Gemini
+// generationConfig fields. Unknown shapes are ignored (field is consumed so it
+// cannot leak into generationConfig and cause a 400).
+func applyGeminiResponseFormat(genCfg map[string]any, rf any) {
+	m, ok := rf.(map[string]any)
+	if !ok {
+		return
+	}
+	switch asString(m, "type") {
+	case "json_object":
+		genCfg["responseMimeType"] = "application/json"
+	case "json_schema":
+		genCfg["responseMimeType"] = "application/json"
+		js, _ := m["json_schema"].(map[string]any)
+		if js == nil {
+			return
+		}
+		if schema, ok := js["schema"]; ok {
+			if s := sanitizeSchema(schema); s != nil {
+				genCfg["responseSchema"] = s
+			}
+		}
+	}
 }
 
 // assistantToolCallParts converts an assistant message's tool_calls into Gemini

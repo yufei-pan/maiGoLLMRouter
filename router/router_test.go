@@ -339,7 +339,7 @@ func responsesProbeServer(t *testing.T, paths *[]string) *httptest.Server {
 		*paths = append(*paths, r.URL.Path)
 		if r.URL.Path == "/responses" {
 			w.WriteHeader(http.StatusNotFound)
-			fmt.Fprint(w, `{"error":{"message":"not found"}}`)
+			fmt.Fprint(w, `{"error":{"message":"Unknown path /responses","code":"unknown_url"}}`)
 			return
 		}
 		fmt.Fprint(w, chatStop)
@@ -585,7 +585,7 @@ func TestResponsesUnwrappableChatReplyIsBadOutput(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/responses" {
 			w.WriteHeader(http.StatusNotFound)
-			fmt.Fprint(w, `{"error":{"message":"not found"}}`)
+			fmt.Fprint(w, `{"error":{"message":"Unknown path /responses","code":"unknown_url"}}`)
 			return
 		}
 		fmt.Fprint(w, `not-json-at-all`)

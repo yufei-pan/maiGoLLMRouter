@@ -109,20 +109,41 @@ func responsesReasoningHasContent(m map[string]any) bool {
 }
 
 // isResponsesUnsupported reports whether an HTTP error indicates the upstream
-// does not expose a /responses route (vs. a normal Responses validation error).
+// does not expose a /responses route (vs. a normal Responses validation error
+// or a model-not-found 404). Bare 404s are not enough: OpenAI-compatible
+// proxies often return 404 for unknown models, and treating those as "no
+// Responses route" would poison the whole provider into Chat-only mode.
 func isResponsesUnsupported(status int, raw []byte) bool {
-	if status == 404 {
-		return true
-	}
 	if status < 400 || status > 499 {
 		return false
 	}
 	s := strings.ToLower(string(raw))
-	if !strings.Contains(s, "/responses") {
+	if isModelNotFoundBody(s) {
 		return false
 	}
-	for _, marker := range []string{"not found", "unknown", "no route", "not supported", "404"} {
-		if strings.Contains(s, marker) {
+	if strings.Contains(s, "/responses") {
+		for _, marker := range []string{"not found", "unknown", "no route", "not supported", "404", "unknown_url"} {
+			if strings.Contains(s, marker) {
+				return true
+			}
+		}
+	}
+	if strings.Contains(s, "unknown_url") {
+		return true
+	}
+	return false
+}
+
+func isModelNotFoundBody(lowerBody string) bool {
+	for _, marker := range []string{
+		"model_not_found",
+		"model not found",
+		"does not exist",
+		"unknown model",
+		"invalid model",
+		"no such model",
+	} {
+		if strings.Contains(lowerBody, marker) {
 			return true
 		}
 	}

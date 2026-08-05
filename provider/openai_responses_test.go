@@ -47,7 +47,7 @@ func TestOpenAIResponsesProbeFallsBackToChat(t *testing.T) {
 		paths = append(paths, r.URL.Path)
 		if r.URL.Path == "/responses" {
 			w.WriteHeader(404)
-			fmt.Fprint(w, `{"error":{"message":"not found"}}`)
+			fmt.Fprint(w, `{"error":{"message":"Unknown path /responses","code":"unknown_url"}}`)
 			return
 		}
 		fmt.Fprint(w, `{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
@@ -224,7 +224,7 @@ func TestOpenAIResponsesProbeFallbackNonPortable(t *testing.T) {
 			t.Errorf("unexpected chat call for a non-portable body")
 		}
 		w.WriteHeader(404)
-		fmt.Fprint(w, `{"error":{"message":"not found"}}`)
+		fmt.Fprint(w, `{"error":{"message":"Unknown path /responses","code":"unknown_url"}}`)
 	}))
 	defer srv.Close()
 
@@ -253,7 +253,7 @@ func TestOpenAIResponsesChatToResponsesFailureClearsBody(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/responses" {
 			w.WriteHeader(404)
-			fmt.Fprint(w, `{"error":{"message":"not found"}}`)
+			fmt.Fprint(w, `{"error":{"message":"Unknown path /responses","code":"unknown_url"}}`)
 			return
 		}
 		fmt.Fprint(w, `not-json-at-all`)
@@ -279,7 +279,7 @@ func TestOpenAIResponsesProbeChatNon2xxKeepsLearn(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/responses" {
 			w.WriteHeader(404)
-			fmt.Fprint(w, `{"error":{"message":"not found"}}`)
+			fmt.Fprint(w, `{"error":{"message":"Unknown path /responses","code":"unknown_url"}}`)
 			return
 		}
 		w.WriteHeader(503)

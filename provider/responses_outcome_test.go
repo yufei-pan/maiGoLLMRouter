@@ -27,8 +27,14 @@ func TestResponsesOutcome(t *testing.T) {
 }
 
 func TestIsResponsesUnsupported(t *testing.T) {
-	if !isResponsesUnsupported(404, []byte(`{}`)) {
-		t.Fatal("404")
+	if isResponsesUnsupported(404, []byte(`{}`)) {
+		t.Fatal("bare 404 without route evidence must not mark Chat-only")
+	}
+	if isResponsesUnsupported(404, []byte(`{"error":{"message":"The model `+"`x`"+` does not exist","code":"model_not_found"}}`)) {
+		t.Fatal("model_not_found 404 must not mark Chat-only")
+	}
+	if !isResponsesUnsupported(404, []byte(`{"error":{"message":"Unknown path /responses","code":"unknown_url"}}`)) {
+		t.Fatal("404 with /responses path evidence")
 	}
 	if !isResponsesUnsupported(400, []byte(`{"error":{"message":"Unknown path /responses"}}`)) {
 		t.Fatal("explicit unknown path")

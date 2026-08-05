@@ -175,9 +175,11 @@ func coerceTrailingRole(req Request, field string) Request {
 		return req
 	}
 	// Only rewrite role-based turns. Typed items (function_call, …) have no
-	// "role" and are not assistant text prefill.
+	// "role" and are not assistant text prefill. Never rewrite tool/function
+	// results: those must stay role "tool" after Responses→Chat translation or
+	// OpenAI-compatible endpoints reject the tool_calls pairing.
 	role := asString(last, "role")
-	if role == "" || role == "user" {
+	if role == "" || role == "user" || role == "tool" || role == "function" {
 		return req
 	}
 
@@ -217,7 +219,12 @@ func isProhibitedContent(raw []byte) bool {
 		Error struct {
 			Message string `json:"message"`
 			Status  string `json:"status"`
+			Code    any    `json:"code"`
 		} `json:"error"`
+		Status            string `json:"status"`
+		IncompleteDetails struct {
+			Reason string `json:"reason"`
+		} `json:"incomplete_details"`
 		PromptFeedback struct {
 			BlockReason string `json:"blockReason"`
 		} `json:"promptFeedback"`
@@ -231,12 +238,24 @@ func isProhibitedContent(raw []byte) bool {
 				Content json.RawMessage `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
+		Output []struct {
+			Status string `json:"status"`
+		} `json:"output"`
 	}
 	// Ignore the error: a partial decode still populates the fields we check, and
 	// a fully invalid body leaves them empty (reported as not-prohibited).
 	_ = json.Unmarshal(raw, &parsed)
 	if matchesProhibited(parsed.Error.Message) || matchesProhibited(parsed.Error.Status) ||
+		matchesProhibited(fmt.Sprint(parsed.Error.Code)) ||
 		matchesProhibited(parsed.PromptFeedback.BlockReason) {
+		return true
+	}
+	// Responses API policy blocks often arrive as incomplete + content_filter
+	// (or PROHIBITED_CONTENT) rather than chat-style choices[].finish_reason.
+	if isContentFilterFinish(parsed.IncompleteDetails.Reason) ||
+		matchesProhibited(parsed.IncompleteDetails.Reason) ||
+		isContentFilterFinish(parsed.Status) ||
+		matchesProhibited(parsed.Status) {
 		return true
 	}
 	for _, c := range parsed.Candidates {
@@ -251,6 +270,11 @@ func isProhibitedContent(raw []byte) bool {
 		// Any content_filter finish is a policy block, even when partial content
 		// was emitted before the provider cut off the response.
 		if isContentFilterFinish(c.FinishReason) {
+			return true
+		}
+	}
+	for _, item := range parsed.Output {
+		if isContentFilterFinish(item.Status) || matchesProhibited(item.Status) {
 			return true
 		}
 	}

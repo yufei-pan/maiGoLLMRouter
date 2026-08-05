@@ -166,3 +166,38 @@ func TestCallCoercesTrailingAssistantForClaudeResponsesPassThrough(t *testing.T)
 		t.Fatalf("inbound last role mutated to %v", origLast["role"])
 	}
 }
+
+func TestCallLeavesTrailingToolMessageForClaude(t *testing.T) {
+	var outbound map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&outbound)
+		fmt.Fprint(w, `{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}]}`)
+	}))
+	defer srv.Close()
+
+	req := Request{
+		Op:    OpChat,
+		Model: "claude-3-5-sonnet",
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": "hi"},
+				map[string]any{
+					"role": "assistant", "content": nil,
+					"tool_calls": []any{map[string]any{
+						"id": "c1", "type": "function",
+						"function": map[string]any{"name": "f", "arguments": "{}"},
+					}},
+				},
+				map[string]any{"role": "tool", "tool_call_id": "c1", "content": "42"},
+			},
+		},
+	}
+	if _, err := Call(context.Background(), srv.Client(), "openai", srv.URL, "k", req); err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	msgs := outbound["messages"].([]any)
+	last := msgs[len(msgs)-1].(map[string]any)
+	if last["role"] != "tool" {
+		t.Fatalf("trailing tool message coerced to %v", last["role"])
+	}
+}

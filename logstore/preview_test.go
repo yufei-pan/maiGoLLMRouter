@@ -18,6 +18,9 @@ func TestRequestContentPreview(t *testing.T) {
 		{"assistant only", `{"messages":[{"role":"assistant","content":"hi"}]}`, "hi"},
 		{"embed input string", `{"input":"embed me"}`, "embed me"},
 		{"embed input array", `{"input":["a","b"]}`, "ab"},
+		{"responses role content", `{"input":[{"role":"user","content":"hello responses"}]}`, "hello responses"},
+		{"responses input_text parts", `{"input":[{"role":"system","content":""},{"role":"user","content":[{"type":"input_text","text":"part hi"}]}]}`, "part hi"},
+		{"responses skip empty then user", `{"input":[{"role":"assistant","content":""},{"role":"user","content":"hi"}]}`, "hi"},
 		{"content parts", `{"messages":[{"role":"user","content":[{"type":"text","text":"part"}]}]}`, "part"},
 		{"truncate", `{"messages":[{"role":"user","content":"` + long + `"}]}`, long[:16]},
 		{"empty", `{}`, ""},
@@ -50,6 +53,7 @@ func TestEstimateInTokens(t *testing.T) {
 		{"empty", `{}`, 0, 0},
 		{"short chat", `{"messages":[{"role":"user","content":"hello"}]}`, 1, 10},
 		{"embed", `{"input":"embed me please"}`, 2, 10},
+		{"responses input items", `{"input":[{"role":"user","content":[{"type":"input_text","text":"hello world from responses"}]}]}`, 4, 20},
 		{"fallback json size", `{`, 1, 1},
 	}
 	for _, tt := range tests {
