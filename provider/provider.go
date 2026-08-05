@@ -13,32 +13,46 @@ import (
 	"strings"
 )
 
-// Operation distinguishes the two supported request kinds.
+// Operation distinguishes the supported request kinds.
 type Operation int
 
 const (
 	OpChat Operation = iota
 	OpEmbed
+	OpResponses
+)
+
+// ResponsesMode selects how an OpResponses request reaches a downstream that
+// may or may not expose the /responses route.
+type ResponsesMode int
+
+const (
+	ResponsesModeProbe    ResponsesMode = iota // try /responses, fall back to chat if absent
+	ResponsesModeForce                         // /responses only, never fall back
+	ResponsesModeChatOnly                      // translate to /chat/completions directly
 )
 
 // Request is a parsed inbound OpenAI-style request plus the resolved downstream
 // model name to use for this attempt.
 type Request struct {
-	Op    Operation
-	Model string         // downstream model name (overrides inbound "model")
-	Body  map[string]any // full inbound JSON body (enables passthrough of extras)
+	Op            Operation
+	Model         string         // downstream model name (overrides inbound "model")
+	Body          map[string]any // full inbound JSON body (enables passthrough of extras)
+	ResponsesMode ResponsesMode  // OpResponses only; meaningful for kind "openai"
 }
 
 // Response is the normalized outcome of a downstream call.
 type Response struct {
-	HTTPStatus   int    // downstream HTTP status (0 if request never sent)
-	OpenAIBody   []byte // response translated into OpenAI JSON
-	FinishReason string // normalized finish reason (chat only): stop, length, ...
-	HasContent   bool   // whether the response carried non-empty content
-	Prohibited   bool   // downstream blocked the request for content-policy reasons
-	OutboundURL  string // downstream URL hit (for logging)
-	OutboundBody []byte // outbound request body sent downstream (for logging)
-	RawResponse  []byte // raw downstream response body (for logging)
+	HTTPStatus    int    // downstream HTTP status (0 if request never sent)
+	OpenAIBody    []byte // response translated into OpenAI JSON
+	FinishReason  string // normalized finish reason (chat only): stop, length, ...
+	HasContent    bool   // whether the response carried non-empty content
+	Prohibited    bool   // downstream blocked the request for content-policy reasons
+	OutboundURL   string // downstream URL hit (for logging)
+	OutboundBody  []byte // outbound request body sent downstream (for logging)
+	RawResponse   []byte // raw downstream response body (for logging)
+	LearnChatOnly bool   // a probe found that the downstream has no /responses route
+	Incompatible  bool   // this Responses body cannot be served over the chat dialect
 }
 
 // OK reports whether the HTTP call itself succeeded (2xx). It does not assess
@@ -59,8 +73,14 @@ func Call(ctx context.Context, client *http.Client, kind, baseURL, apiKey string
 	case "openai":
 		resp, err = callOpenAI(ctx, client, baseURL, apiKey, req)
 	case "gemini":
+		if req.Op == OpResponses {
+			return nil, errResponsesUnsupportedKind(kind)
+		}
 		resp, err = callGemini(ctx, client, baseURL, apiKey, req)
 	case "anthropic":
+		if req.Op == OpResponses {
+			return nil, errResponsesUnsupportedKind(kind)
+		}
 		resp, err = callAnthropic(ctx, client, baseURL, apiKey, req)
 	default:
 		return nil, fmt.Errorf("unknown provider kind %q", kind)
@@ -69,6 +89,10 @@ func Call(ctx context.Context, client *http.Client, kind, baseURL, apiKey string
 		resp.Prohibited = true
 	}
 	return resp, err
+}
+
+func errResponsesUnsupportedKind(kind string) error {
+	return fmt.Errorf("provider kind %q cannot serve responses requests", kind)
 }
 
 // resolvedModelLeaf returns the last path segment of a possibly proxied model
