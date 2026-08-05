@@ -31,6 +31,10 @@ max_retries = 2
 # "length" means the client-requested max_tokens limit was hit (a normal completion).
 good_finish_reasons = ["stop", "length", "tool_calls", "function_call", "end_turn"]
 
+# When the last chat/responses turn is assistant (etc.), rewrite it to user and
+# flip first-person pronouns in that turn. Applies to all models. Default true.
+# coerce_trailing_assistant = true
+
 # Poll the config file for changes and reload routing settings automatically.
 # Default is 3s. Set to 0 to disable polling; SIGHUP / systemctl reload still
 # reloads without restarting the process.

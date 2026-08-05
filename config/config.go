@@ -55,11 +55,11 @@ type Config struct {
 
 // Server holds top-level server settings.
 type Server struct {
-	Listen            string
-	LogDir            string
-	LogRetention      time.Duration // detail logs older than this are deleted; 0 disables
-	ClientKeys        []string
-	GlobalBlackout    time.Duration
+	Listen         string
+	LogDir         string
+	LogRetention   time.Duration // detail logs older than this are deleted; 0 disables
+	ClientKeys     []string
+	GlobalBlackout time.Duration
 	// MaxRetries is deprecated and no longer has any effect: a key is never
 	// retried in place. A bad output advances to the next key without blackout;
 	// a provider error blacks out the key and advances. The field is retained so
@@ -70,6 +70,11 @@ type Server struct {
 	// ConfigReloadInterval controls automatic config reload when the file
 	// changes. Zero disables polling; SIGHUP / systemctl reload still reloads.
 	ConfigReloadInterval time.Duration
+
+	// CoerceTrailingAssistant rewrites a trailing non-user/tool/function turn
+	// to role "user" (and flips pronouns in that turn) at request ingest.
+	// Default true when the TOML key is omitted.
+	CoerceTrailingAssistant bool
 
 	// GeneratedClientKey is set when client_keys was empty and a random key
 	// was generated to secure the inbound API. Empty otherwise.
@@ -148,7 +153,8 @@ type rawServer struct {
 	GoodFinishReasons []string `toml:"good_finish_reasons"`
 	// Poll interval for automatic config reload (e.g. "3s"). "0" disables
 	// polling; SIGHUP / systemctl reload still reloads. Default: 3s.
-	ConfigReloadInterval string `toml:"config_reload_interval"`
+	ConfigReloadInterval    string `toml:"config_reload_interval"`
+	CoerceTrailingAssistant *bool  `toml:"coerce_trailing_assistant"`
 }
 
 type rawProvider struct {
@@ -252,6 +258,10 @@ func build(raw rawConfig) (*Config, error) {
 			}
 			srv.ConfigReloadInterval = d
 		}
+	}
+	srv.CoerceTrailingAssistant = true
+	if raw.Server.CoerceTrailingAssistant != nil {
+		srv.CoerceTrailingAssistant = *raw.Server.CoerceTrailingAssistant
 	}
 	cfg.Server = srv
 

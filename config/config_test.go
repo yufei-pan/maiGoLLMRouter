@@ -306,3 +306,46 @@ supports_responses = false
 	}
 }
 
+func TestCoerceTrailingAssistantDefaultAndExplicit(t *testing.T) {
+	minimal := `
+[[provider]]
+name = "openai"
+kind = "openai"
+base_url = "https://api.openai.com"
+keys = ["k"]
+`
+	cfg, err := Load(writeTemp(t, minimal+`
+[server]
+client_keys = ["sk"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Server.CoerceTrailingAssistant {
+		t.Fatal("omitted coerce_trailing_assistant should default true")
+	}
+
+	cfgFalse, err := Load(writeTemp(t, minimal+`
+[server]
+client_keys = ["sk"]
+coerce_trailing_assistant = false
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfgFalse.Server.CoerceTrailingAssistant {
+		t.Fatal("explicit false not respected")
+	}
+
+	cfgTrue, err := Load(writeTemp(t, minimal+`
+[server]
+client_keys = ["sk"]
+coerce_trailing_assistant = true
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfgTrue.Server.CoerceTrailingAssistant {
+		t.Fatal("explicit true not respected")
+	}
+}
