@@ -10,3 +10,5 @@
 
 # OS / editor
 .DS_Store
+.worktrees/
+.superpowers/
