@@ -50,11 +50,13 @@ func (r *Router) Reload(cfg *config.Config) {
 	r.mu.Lock()
 	r.cfg = cfg
 	r.clients = clients
+	// Base URLs and supports_responses may have changed, so learned Responses
+	// verdicts no longer describe the current downstreams. Clear under the
+	// write lock so Execute (RLock) never observes the new config with a
+	// stale cache, and MarkChatOnly cannot race Clear after Unlock.
+	r.respCaps.Clear()
 	r.mu.Unlock()
 	r.blackout.SetDuration(cfg.Server.GlobalBlackout)
-	// Base URLs and supports_responses may have changed, so learned Responses
-	// verdicts no longer describe the current downstreams.
-	r.respCaps.Clear()
 }
 
 // Attempt records a single downstream call for logging.
@@ -249,7 +251,9 @@ func (r *Router) tryKey(ctx context.Context, res *Result, p *config.Provider, mo
 	resp, att, oc := r.callOnce(ctx, p, model, op, body, key, keyType)
 	res.Attempts = append(res.Attempts, att)
 	notifyAttempt(ctx, att)
-	if resp != nil {
+	// Incompatible responses have HTTPStatus 0 and an empty body — they must
+	// not overwrite a real provider_error used for exhaustion forwarding.
+	if resp != nil && !resp.Incompatible {
 		*last = resp
 	}
 	switch oc {

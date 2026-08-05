@@ -523,6 +523,61 @@ targets = ["chatonly/real-model", "native/real-model"]
 	}
 }
 
+// TestExhaustionPreservesProviderErrorOverIncompatible verifies that an
+// incompatible second target (no HTTP call) must not overwrite the last
+// real provider_error, so exhaustion returns the earlier 429 body/status
+// instead of a generic 502.
+func TestExhaustionPreservesProviderErrorOverIncompatible(t *testing.T) {
+	const rateLimitBody = `{"error":{"message":"rate limited","type":"rate_limit_error"}}`
+	rateSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprint(w, rateLimitBody)
+	}))
+	defer rateSrv.Close()
+
+	cfg := loadCfg(t, fmt.Sprintf(`
+[[provider]]
+name = "ratelimited"
+kind = "openai"
+base_url = %q
+keys = ["r1"]
+supports_responses = true
+
+[[provider]]
+name = "chatonly"
+kind = "openai"
+base_url = "http://127.0.0.1:0"
+keys = ["c1"]
+supports_responses = false
+
+[model."m"]
+targets = ["ratelimited/real-model", "chatonly/real-model"]
+`, rateSrv.URL))
+
+	body := responsesReq()
+	body["tools"] = []any{map[string]any{"type": "web_search"}}
+
+	res := New(cfg).Execute(context.Background(), provider.OpResponses, "m", body)
+	if res.Success {
+		t.Fatal("expected exhaustion, got success")
+	}
+	if res.Status != http.StatusTooManyRequests {
+		t.Errorf("status = %d, want 429 (preserved provider_error), body=%s", res.Status, res.Body)
+	}
+	if string(res.Body) != rateLimitBody {
+		t.Errorf("body = %s, want the 429 JSON from the first target", res.Body)
+	}
+	if len(res.Attempts) < 2 {
+		t.Fatalf("attempts = %d, want at least provider_error then incompatible", len(res.Attempts))
+	}
+	if res.Attempts[0].Outcome != "provider_error" || res.Attempts[0].HTTPStatus != http.StatusTooManyRequests {
+		t.Errorf("first attempt = %+v, want provider_error 429", res.Attempts[0])
+	}
+	if res.Attempts[1].Outcome != "incompatible" {
+		t.Errorf("second attempt = %+v, want incompatible", res.Attempts[1])
+	}
+}
+
 // TestResponsesUnwrappableChatReplyIsBadOutput verifies a chat reply that cannot
 // be wrapped into a Responses object is a bad output (an HTTP 200 with no usable
 // body), not a success.
