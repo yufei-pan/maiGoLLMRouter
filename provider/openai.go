@@ -77,7 +77,7 @@ func openAIResponsesViaChat(ctx context.Context, client *http.Client, baseURL, a
 		return &Response{Incompatible: true, LearnChatOnly: learnedChatOnly}, nil
 	}
 
-	chatReq := withClaudeTrailingUserCoercion(Request{Op: OpChat, Model: req.Model, Body: chatBody})
+	chatReq := Request{Op: OpChat, Model: req.Model, Body: chatBody}
 	resp, err := callOpenAI(ctx, client, baseURL, apiKey, chatReq)
 	if resp != nil {
 		resp.LearnChatOnly = learnedChatOnly

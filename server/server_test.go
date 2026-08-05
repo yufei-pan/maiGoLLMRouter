@@ -78,3 +78,89 @@ targets = ["openai/real-model"]
 		t.Fatalf("unexpected Responses JSON: %#v", parsed)
 	}
 }
+
+func TestIngestCoercesTrailingAssistantWhenEnabled(t *testing.T) {
+	var outbound map[string]any
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&outbound)
+		fmt.Fprint(w, `{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}]}`)
+	}))
+	defer backend.Close()
+
+	cfg := loadCfg(t, fmt.Sprintf(`
+[server]
+client_keys = ["sk-test"]
+# coerce_trailing_assistant omitted => true
+
+[[provider]]
+name = "openai"
+kind = "openai"
+base_url = %q
+keys = ["sk-upstream"]
+
+[model."m"]
+targets = ["openai/gpt-4o"]
+`, backend.URL))
+
+	rt := router.New(cfg)
+	srv := New(cfg, rt, nil, nil)
+	mux := http.NewServeMux()
+	srv.Register(mux)
+
+	reqBody := `{"model":"m","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"I 我"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer sk-test")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.Bytes())
+	}
+	last := outbound["messages"].([]any)[1].(map[string]any)
+	if last["role"] != "user" || last["content"] != "you 你" {
+		t.Fatalf("outbound last=%#v", last)
+	}
+}
+
+func TestIngestSkipsCoercionWhenDisabled(t *testing.T) {
+	var outbound map[string]any
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&outbound)
+		fmt.Fprint(w, `{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}]}`)
+	}))
+	defer backend.Close()
+
+	cfg := loadCfg(t, fmt.Sprintf(`
+[server]
+client_keys = ["sk-test"]
+coerce_trailing_assistant = false
+
+[[provider]]
+name = "openai"
+kind = "openai"
+base_url = %q
+keys = ["sk-upstream"]
+
+[model."m"]
+targets = ["openai/gpt-4o"]
+`, backend.URL))
+
+	rt := router.New(cfg)
+	srv := New(cfg, rt, nil, nil)
+	mux := http.NewServeMux()
+	srv.Register(mux)
+
+	reqBody := `{"model":"m","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"I"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer sk-test")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d", rec.Code)
+	}
+	last := outbound["messages"].([]any)[1].(map[string]any)
+	if last["role"] != "assistant" || last["content"] != "I" {
+		t.Fatalf("outbound last=%#v", last)
+	}
+}

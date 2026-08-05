@@ -169,6 +169,18 @@ func (s *Server) handle(op provider.Operation) http.HandlerFunc {
 			return
 		}
 
+		s.mu.RLock()
+		coerce := s.cfg.Server.CoerceTrailingAssistant
+		s.mu.RUnlock()
+		if coerce {
+			switch op {
+			case provider.OpChat:
+				body = provider.CoerceTrailingAssistantTurn(body, "messages")
+			case provider.OpResponses:
+				body = provider.CoerceTrailingAssistantTurn(body, "input")
+			}
+		}
+
 		start := time.Now()
 		var live *inflight.Entry
 		reqID := "req-" + randomID()

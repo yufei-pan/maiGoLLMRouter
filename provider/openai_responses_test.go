@@ -170,8 +170,8 @@ func TestOpenAIResponsesChatOnlySkipsResponsesRoute(t *testing.T) {
 		t.Fatalf("outbound messages=%v", outbound["messages"])
 	}
 	last, _ := msgs[1].(map[string]any)
-	if last["role"] != "user" {
-		t.Fatalf("claude coercion not applied to the chat request: %v", last)
+	if last["role"] != "assistant" {
+		t.Fatalf("Call should not coerce trailing assistant anymore: %v", last)
 	}
 }
 

@@ -65,8 +65,6 @@ func (r *Response) OK() bool {
 // transport-level failure (no usable HTTP response); HTTP error statuses are
 // reported via Response.HTTPStatus with a nil error.
 func Call(ctx context.Context, client *http.Client, kind, baseURL, apiKey string, req Request) (*Response, error) {
-	req = withClaudeTrailingUserCoercion(req)
-
 	var resp *Response
 	var err error
 	if req.Op == OpResponses && kind != "openai" {
@@ -100,7 +98,6 @@ func callResponsesViaChat(ctx context.Context, client *http.Client, kind, baseUR
 		return &Response{Incompatible: true}, nil
 	}
 	chatReq := Request{Op: OpChat, Model: req.Model, Body: chatBody}
-	chatReq = withClaudeTrailingUserCoercion(chatReq)
 	var resp *Response
 	switch kind {
 	case "anthropic":
@@ -124,80 +121,6 @@ func callResponsesViaChat(ctx context.Context, client *http.Client, kind, baseUR
 	}
 	resp.OpenAIBody = wrapped
 	return resp, nil
-}
-
-// resolvedModelLeaf returns the last path segment of a possibly proxied model
-// name (e.g. "a/b/claude-3" -> "claude-3").
-func resolvedModelLeaf(model string) string {
-	if i := strings.LastIndex(model, "/"); i >= 0 {
-		return model[i+1:]
-	}
-	return model
-}
-
-// isClaudeModelName reports whether the resolved downstream model is a Claude
-// model, including names wrapped by intermediate proxy prefixes.
-func isClaudeModelName(model string) bool {
-	leaf := resolvedModelLeaf(model)
-	return strings.HasPrefix(leaf, "claude-") || strings.HasPrefix(leaf, "anthropic.claude-")
-}
-
-// withClaudeTrailingUserCoercion returns a request whose last conversation turn
-// is role "user" when the resolved model is Claude. Downstream Anthropic (and
-// OpenAI-style proxies that translate to it) reject assistant prefill.
-//
-// For OpChat this rewrites Body["messages"]; for OpResponses it rewrites
-// Body["input"] role-based items. Typed Responses items (function_call, etc.)
-// are left alone. The shared inbound body is not mutated.
-func withClaudeTrailingUserCoercion(req Request) Request {
-	if !isClaudeModelName(req.Model) {
-		return req
-	}
-	switch req.Op {
-	case OpChat:
-		return coerceTrailingRole(req, "messages")
-	case OpResponses:
-		return coerceTrailingRole(req, "input")
-	default:
-		return req
-	}
-}
-
-// coerceTrailingRole copies body[field] (a []any of message/input maps) and
-// forces the last role-bearing item to role "user" when it is not already.
-func coerceTrailingRole(req Request, field string) Request {
-	items, ok := req.Body[field].([]any)
-	if !ok || len(items) == 0 {
-		return req
-	}
-	last, ok := items[len(items)-1].(map[string]any)
-	if !ok {
-		return req
-	}
-	// Only rewrite role-based turns. Typed items (function_call, …) have no
-	// "role" and are not assistant text prefill. Never rewrite tool/function
-	// results: those must stay role "tool" after Responses→Chat translation or
-	// OpenAI-compatible endpoints reject the tool_calls pairing.
-	role := asString(last, "role")
-	if role == "" || role == "user" || role == "tool" || role == "function" {
-		return req
-	}
-
-	copiedLast := make(map[string]any, len(last)+1)
-	for k, v := range last {
-		copiedLast[k] = v
-	}
-	copiedLast["role"] = "user"
-	copiedItems := append([]any(nil), items...)
-	copiedItems[len(copiedItems)-1] = copiedLast
-
-	body := make(map[string]any, len(req.Body))
-	for k, v := range req.Body {
-		body[k] = v
-	}
-	body[field] = copiedItems
-	req.Body = body
-	return req
 }
 
 // ProhibitedContentMarker is the sentinel a downstream emits when it refuses a
