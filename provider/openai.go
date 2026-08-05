@@ -55,7 +55,15 @@ func callOpenAIResponses(ctx context.Context, client *http.Client, baseURL, apiK
 	// Only a probe downgrades to chat: force mode surfaces a missing route as a
 	// plain provider error so the router can retry a different target instead.
 	if req.ResponsesMode == ResponsesModeProbe && isResponsesUnsupported(resp.HTTPStatus, resp.RawResponse) {
-		return openAIResponsesViaChat(ctx, client, baseURL, apiKey, req, body, true)
+		chatResp, err := openAIResponsesViaChat(ctx, client, baseURL, apiKey, req, body, true)
+		// When the chat translation is incompatible, keep the failed /responses
+		// attempt's outbound fields for logging (HTTPStatus stays 0).
+		if chatResp != nil && chatResp.Incompatible {
+			chatResp.OutboundURL = resp.OutboundURL
+			chatResp.OutboundBody = resp.OutboundBody
+			chatResp.RawResponse = resp.RawResponse
+		}
+		return chatResp, err
 	}
 	return resp, nil
 }
@@ -80,6 +88,8 @@ func openAIResponsesViaChat(ctx context.Context, client *http.Client, baseURL, a
 
 	wrapped, err := ChatToResponses(resp.OpenAIBody, req.Model)
 	if err != nil {
+		// Do not forward a Chat-shaped body on /v1/responses.
+		resp.OpenAIBody = nil
 		resp.FinishReason, resp.HasContent = "", false
 		return resp, nil
 	}

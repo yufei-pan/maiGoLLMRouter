@@ -211,4 +211,66 @@ func TestOpenAIResponsesProbeFallbackNonPortable(t *testing.T) {
 	if !resp.Incompatible || !resp.LearnChatOnly {
 		t.Fatalf("want incompatible + learned chat-only, got %+v", resp)
 	}
+	if resp.HTTPStatus != 0 {
+		t.Fatalf("incompatible must keep HTTPStatus 0, got %d", resp.HTTPStatus)
+	}
+	if !strings.HasSuffix(resp.OutboundURL, "/responses") {
+		t.Fatalf("want failed /responses outbound url, got %s", resp.OutboundURL)
+	}
+	if len(resp.OutboundBody) == 0 || len(resp.RawResponse) == 0 {
+		t.Fatalf("want preserved /responses outbound/raw, got outbound=%q raw=%q", resp.OutboundBody, resp.RawResponse)
+	}
+}
+
+func TestOpenAIResponsesChatToResponsesFailureClearsBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/responses" {
+			w.WriteHeader(404)
+			fmt.Fprint(w, `{"error":{"message":"not found"}}`)
+			return
+		}
+		fmt.Fprint(w, `not-json-at-all`)
+	}))
+	defer srv.Close()
+
+	resp, err := Call(context.Background(), srv.Client(), "openai", srv.URL, "k", Request{
+		Op: OpResponses, Model: "m", ResponsesMode: ResponsesModeProbe,
+		Body: map[string]any{"input": "hi"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.OpenAIBody != nil || resp.HasContent {
+		t.Fatalf("ChatToResponses failure must clear OpenAIBody and HasContent: body=%q has=%v", resp.OpenAIBody, resp.HasContent)
+	}
+	if !resp.OK() || !resp.LearnChatOnly {
+		t.Fatalf("want OK chat status + LearnChatOnly, got %+v", resp)
+	}
+}
+
+func TestOpenAIResponsesProbeChatNon2xxKeepsLearn(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/responses" {
+			w.WriteHeader(404)
+			fmt.Fprint(w, `{"error":{"message":"not found"}}`)
+			return
+		}
+		w.WriteHeader(503)
+		fmt.Fprint(w, `{"error":{"message":"unavailable"}}`)
+	}))
+	defer srv.Close()
+
+	resp, err := Call(context.Background(), srv.Client(), "openai", srv.URL, "k", Request{
+		Op: OpResponses, Model: "m", ResponsesMode: ResponsesModeProbe,
+		Body: map[string]any{"input": "hi"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.OK() || !resp.LearnChatOnly {
+		t.Fatalf("want non-OK chat with LearnChatOnly, got %+v", resp)
+	}
+	if resp.HTTPStatus != 503 {
+		t.Fatalf("status=%d", resp.HTTPStatus)
+	}
 }
