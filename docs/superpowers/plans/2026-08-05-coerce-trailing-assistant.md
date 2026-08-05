@@ -563,7 +563,7 @@ func TestCallDoesNotCoerceTrailingAssistant(t *testing.T) {
 }
 ```
 
-In `provider/openai_responses_test.go`, in `TestOpenAIResponsesChatOnlyPortable` (or whatever test currently asserts `last["role"] != "user"` / `"claude coercion not applied"`), change the assertion so trailing assistant stays `assistant` when Call is invoked without prior ingest coerce — remove the block:
+In `provider/openai_responses_test.go`, in `TestOpenAIResponsesChatOnlySkipsResponsesRoute`, change the assertion so trailing assistant stays `assistant` when Call is invoked without prior ingest coerce — remove the block:
 
 ```go
 	if last["role"] != "user" {
