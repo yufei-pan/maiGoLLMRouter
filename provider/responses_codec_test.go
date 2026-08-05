@@ -162,3 +162,44 @@ func TestResponsesToChatMapsToolCallsAndMultipart(t *testing.T) {
 		t.Fatalf("tool_call=%v", tc)
 	}
 }
+
+func TestChatToResponsesTextAndTools(t *testing.T) {
+	chat := []byte(`{
+	  "id":"chatcmpl-1",
+	  "model":"m",
+	  "choices":[{
+	    "finish_reason":"tool_calls",
+	    "message":{
+	      "role":"assistant",
+	      "content":"hello",
+	      "tool_calls":[{
+	        "id":"c1","type":"function",
+	        "function":{"name":"fn","arguments":"{}"}
+	      }]
+	    }
+	  }],
+	  "usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}
+	}`)
+	out, err := ChatToResponses(chat, "real-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if parsed["object"] != "response" || parsed["status"] != "completed" {
+		t.Fatalf("envelope=%v", parsed)
+	}
+	if parsed["model"] != "real-model" {
+		t.Fatalf("model=%v", parsed["model"])
+	}
+	output, _ := parsed["output"].([]any)
+	if len(output) < 2 {
+		t.Fatalf("output=%v", parsed["output"])
+	}
+	usage, _ := parsed["usage"].(map[string]any)
+	if usage["input_tokens"] != float64(3) || usage["output_tokens"] != float64(4) {
+		t.Fatalf("usage=%v", usage)
+	}
+}

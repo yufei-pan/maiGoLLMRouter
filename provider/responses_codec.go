@@ -1,6 +1,8 @@
 package provider
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 )
@@ -318,4 +320,70 @@ func stringifyAny(v any) (string, error) {
 		}
 		return string(b), nil
 	}
+}
+
+// ChatToResponses translates a Chat Completions response into a synthetic
+// Responses API object (message and/or function_call output items).
+func ChatToResponses(chatRaw []byte, model string) ([]byte, error) {
+	var chat map[string]any
+	if err := json.Unmarshal(chatRaw, &chat); err != nil {
+		return nil, err
+	}
+
+	output := make([]any, 0, 2)
+	if choices, ok := chat["choices"].([]any); ok && len(choices) > 0 {
+		choice, _ := choices[0].(map[string]any)
+		msg, _ := choice["message"].(map[string]any)
+		if msg != nil {
+			if text, _ := msg["content"].(string); text != "" {
+				output = append(output, map[string]any{
+					"type": "message",
+					"role": "assistant",
+					"content": []any{
+						map[string]any{"type": "output_text", "text": text},
+					},
+				})
+			}
+			if tcs, ok := msg["tool_calls"].([]any); ok {
+				for _, tc := range tcs {
+					tcm, ok := tc.(map[string]any)
+					if !ok {
+						continue
+					}
+					fn, _ := tcm["function"].(map[string]any)
+					args, err := stringifyAny(fn["arguments"])
+					if err != nil {
+						return nil, fmt.Errorf("tool_call arguments: %w", err)
+					}
+					output = append(output, map[string]any{
+						"type":      "function_call",
+						"call_id":   tcm["id"],
+						"name":      fn["name"],
+						"arguments": args,
+					})
+				}
+			}
+		}
+	}
+
+	usageOut := map[string]any{}
+	if usage, ok := chat["usage"].(map[string]any); ok {
+		usageOut["input_tokens"] = usage["prompt_tokens"]
+		usageOut["output_tokens"] = usage["completion_tokens"]
+		usageOut["total_tokens"] = usage["total_tokens"]
+	}
+
+	var idBytes [8]byte
+	if _, err := rand.Read(idBytes[:]); err != nil {
+		idBytes = [8]byte{}
+	}
+	resp := map[string]any{
+		"id":     "resp_mai_" + hex.EncodeToString(idBytes[:]),
+		"object": "response",
+		"status": "completed",
+		"model":  model,
+		"output": output,
+		"usage":  usageOut,
+	}
+	return json.Marshal(resp)
 }
