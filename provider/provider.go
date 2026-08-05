@@ -69,21 +69,19 @@ func Call(ctx context.Context, client *http.Client, kind, baseURL, apiKey string
 
 	var resp *Response
 	var err error
-	switch kind {
-	case "openai":
-		resp, err = callOpenAI(ctx, client, baseURL, apiKey, req)
-	case "gemini":
-		if req.Op == OpResponses {
-			return nil, errResponsesUnsupportedKind(kind)
+	if req.Op == OpResponses && kind != "openai" {
+		resp, err = callResponsesViaChat(ctx, client, kind, baseURL, apiKey, req)
+	} else {
+		switch kind {
+		case "openai":
+			resp, err = callOpenAI(ctx, client, baseURL, apiKey, req)
+		case "gemini":
+			resp, err = callGemini(ctx, client, baseURL, apiKey, req)
+		case "anthropic":
+			resp, err = callAnthropic(ctx, client, baseURL, apiKey, req)
+		default:
+			return nil, fmt.Errorf("unknown provider kind %q", kind)
 		}
-		resp, err = callGemini(ctx, client, baseURL, apiKey, req)
-	case "anthropic":
-		if req.Op == OpResponses {
-			return nil, errResponsesUnsupportedKind(kind)
-		}
-		resp, err = callAnthropic(ctx, client, baseURL, apiKey, req)
-	default:
-		return nil, fmt.Errorf("unknown provider kind %q", kind)
 	}
 	if resp != nil && isProhibitedContent(resp.RawResponse) {
 		resp.Prohibited = true
@@ -91,8 +89,40 @@ func Call(ctx context.Context, client *http.Client, kind, baseURL, apiKey string
 	return resp, err
 }
 
-func errResponsesUnsupportedKind(kind string) error {
-	return fmt.Errorf("provider kind %q cannot serve responses requests", kind)
+// callResponsesViaChat serves OpResponses for non-OpenAI dialects by translating
+// through the Chat codec (Responses → Chat → dialect → Chat → Responses).
+func callResponsesViaChat(ctx context.Context, client *http.Client, kind, baseURL, apiKey string, req Request) (*Response, error) {
+	if err := PortableForChat(req.Body); err != nil {
+		return &Response{Incompatible: true}, nil
+	}
+	chatBody, err := ResponsesToChat(req.Body, req.Model)
+	if err != nil {
+		return &Response{Incompatible: true}, nil
+	}
+	chatReq := Request{Op: OpChat, Model: req.Model, Body: chatBody}
+	chatReq = withClaudeTrailingUserCoercion(chatReq)
+	var resp *Response
+	switch kind {
+	case "anthropic":
+		resp, err = callAnthropic(ctx, client, baseURL, apiKey, chatReq)
+	case "gemini":
+		resp, err = callGemini(ctx, client, baseURL, apiKey, chatReq)
+	default:
+		return nil, fmt.Errorf("unknown provider kind %q", kind)
+	}
+	if err != nil || resp == nil || !resp.OK() {
+		return resp, err
+	}
+	wrapped, werr := ChatToResponses(resp.OpenAIBody, req.Model)
+	if werr != nil {
+		// Do not forward a Chat-shaped body on /v1/responses.
+		resp.OpenAIBody = nil
+		resp.FinishReason, resp.HasContent = "", false
+		return resp, nil
+	}
+	resp.OpenAIBody = wrapped
+	resp.FinishReason, resp.HasContent = responsesOutcome(wrapped)
+	return resp, nil
 }
 
 // resolvedModelLeaf returns the last path segment of a possibly proxied model
