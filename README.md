@@ -11,14 +11,14 @@ Minimal dependencies: the Go standard library plus one TOML parser
 
 ## Features
 
-- **OpenAI-compatible inbound API** (`POST /v1/chat/completions`, `POST /v1/embeddings`) with `Authorization: Bearer` auth validated against configured client keys.
-- **Outbound dialect translation**: OpenAI (pass-through), Anthropic (`/messages`), Gemini (`:generateContent` / `:batchEmbedContents`). The version segment comes from each provider's `base_url`. Responses are translated back to OpenAI format.
+- **OpenAI-compatible inbound API** (`POST /v1/chat/completions`, `POST /v1/embeddings`, `POST /v1/responses`) with `Authorization: Bearer` auth validated against configured client keys.
+- **Outbound dialect translation**: OpenAI (pass-through), Anthropic (`/messages`), Gemini (`:generateContent` / `:batchEmbedContents`). The version segment comes from each provider's `base_url`. Responses are translated back to OpenAI format. OpenAI-kind providers can pass Responses through to `/responses` (or probe then fall back to Chat); Anthropic/Gemini serve portable Responses via Chat translation.
 - **Multiple normal keys per provider**, one chosen at random; all are tried before advancing.
 - **Ordered fallback keys** per provider, tried only after every normal key/model is exhausted; never blacked out.
 - **Key blackout**: a normal key that fails for a given model is skipped for that model for a configurable duration; the same key stays usable for other models.
 - **Allowed-models gating** for fallback keys.
 - **Output verification + retry**: chat responses must have content and a "good" finish reason; otherwise the request is retried (bounded, no blackout).
-- **Chat and embeddings** support.
+- **Chat, embeddings, and Responses** support.
 - **Model mapping**: inbound model name → ordered list of `provider/model` targets.
 - **Fallback providers**: a list of catch-all providers for unmapped names, tried in sequence (or shuffled).
 - **Pass-through** of unknown request arguments to the downstream provider.
@@ -98,6 +98,15 @@ curl http://localhost:8470/v1/chat/completions \
   -d '{"model":"gpt-4o","messages":[{"role":"user","content":"Hello!"}]}'
 ```
 
+Responses API (same auth and model routing):
+
+```bash
+curl http://localhost:8470/v1/responses \
+  -H "Authorization: Bearer sk-local-change-me" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o","input":"Hello!"}'
+```
+
 ## Configuration
 
 See `[config.example.toml](config.example.toml)` for a fully commented example.
@@ -129,10 +138,11 @@ See `[config.example.toml](config.example.toml)` for a fully commented example.
 | `keys`            | Normal keys (random selection, blacked out on failure).                                                                                                                                                                                                                                           |
 | `fallback_keys`   | Fallback keys (tried in order, never blacked out). If omitted but `fallback_models` is set, the normal `keys` are reused for the fallback round.                                                                                                                                                  |
 | `fallback_models` | Models allowed on the fallback round (empty = all).                                                                                                                                                                                                                                               |
+| `supports_responses` | Optional. `true` = always `POST /responses`; `false` = never probe, Chat-translate portable Responses inbound; omit = probe `/responses` once and cache Chat-only until config reload. Applies to OpenAI-kind providers; Anthropic/Gemini always use Chat translation for portable Responses. |
 
 
 If the same `name` appears multiple times, the key lists are **combined** and the
-scalar fields (`kind`, `base_url`, `timeout`) from the **last** entry win.
+scalar fields (`kind`, `base_url`, `timeout`, `supports_responses`) from the **last** entry win.
 
 ### Model routing
 
@@ -267,7 +277,7 @@ Practical implications:
 
 ## Notes & limitations
 
-- Streaming (SSE) is not supported; `stream` and `stream_options` are removed before forwarding so output can be verified before retrying.
+- Streaming (SSE) is not supported; `stream` and `stream_options` are removed before forwarding so output can be verified before retrying. The same applies to inbound `POST /v1/responses`.
 - Anthropic does not support embeddings; embedding requests routed there return an error and advance.
 - For translated dialects, pass-through of unknown arguments is best-effort. For Gemini, known top-level request fields (`toolConfig`, `safetySettings`, `systemInstruction`, `cachedContent`, `labels`, in camelCase or snake_case) are placed at the request root and an explicit `generationConfig` is merged in; all other extras go into `generationConfig`. For Anthropic, extras are merged top-level. OpenAI is pass-through except for unsupported streaming controls.
 - **Gemini tool calling** is translated from the OpenAI shape: `tools` (`{type:"function", function:{...}}`) and the legacy `functions` array become Gemini `functionDeclarations` (the parameter JSON Schema is sanitized to the fields Gemini accepts, dropping e.g. `additionalProperties`/`$schema`), `tool_choice` becomes `toolConfig.functionCallingConfig`, assistant `tool_calls` and `tool` result messages become `functionCall`/`functionResponse` parts, and Gemini `functionCall` responses are converted back into OpenAI `tool_calls` (with `finish_reason: "tool_calls"`). Tools already in Gemini-native form (`{functionDeclarations:[...]}`) are passed through unchanged.

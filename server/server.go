@@ -54,6 +54,7 @@ func (s *Server) Reload(cfg *config.Config) {
 func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/chat/completions", s.handle(provider.OpChat))
 	mux.HandleFunc("/v1/embeddings", s.handle(provider.OpEmbed))
+	mux.HandleFunc("/v1/responses", s.handle(provider.OpResponses))
 	mux.HandleFunc("/v1/models", s.handleModels)
 	mux.HandleFunc("/v1/models/", s.handleModel)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -135,8 +136,11 @@ func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handle(op provider.Operation) http.HandlerFunc {
 	endpoint := "/v1/chat/completions"
-	if op == provider.OpEmbed {
+	switch op {
+	case provider.OpEmbed:
 		endpoint = "/v1/embeddings"
+	case provider.OpResponses:
+		endpoint = "/v1/responses"
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
