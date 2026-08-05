@@ -107,6 +107,13 @@ curl http://localhost:8470/v1/responses \
   -d '{"model":"gpt-4o","input":"Hello!"}'
 ```
 
+When a target has to serve a Responses request through Chat translation
+(Anthropic/Gemini, or an OpenAI-kind provider without a `/responses` route), the
+request must be *portable*: function tools only, plain message/function-call
+input items, and no `previous_response_id`. `instructions` becomes a leading
+system message; `reasoning`, `include`, and `truncation` are dropped. A
+non-portable request skips that target and falls through to the next one.
+
 ## Configuration
 
 See `[config.example.toml](config.example.toml)` for a fully commented example.

@@ -113,7 +113,9 @@ func callResponsesViaChat(ctx context.Context, client *http.Client, kind, baseUR
 	if err != nil || resp == nil || !resp.OK() {
 		return resp, err
 	}
-	wrapped, werr := ChatToResponses(resp.OpenAIBody, req.Model)
+	// The translated path is verified as the Chat call it really was, so
+	// FinishReason/HasContent from the Chat dialect are kept as-is.
+	wrapped, werr := ChatToResponses(resp.OpenAIBody, req.Model, resp.FinishReason)
 	if werr != nil {
 		// Do not forward a Chat-shaped body on /v1/responses.
 		resp.OpenAIBody = nil
@@ -121,7 +123,6 @@ func callResponsesViaChat(ctx context.Context, client *http.Client, kind, baseUR
 		return resp, nil
 	}
 	resp.OpenAIBody = wrapped
-	resp.FinishReason, resp.HasContent = responsesOutcome(wrapped)
 	return resp, nil
 }
 

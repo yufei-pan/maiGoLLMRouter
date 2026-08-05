@@ -175,6 +175,33 @@ func TestOpenAIResponsesChatOnlySkipsResponsesRoute(t *testing.T) {
 	}
 }
 
+func TestOpenAIResponsesChatOnlyKeepsChatFinishReason(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"choices":[{"finish_reason":"length","message":{"role":"assistant","content":"trunc"}}]}`)
+	}))
+	defer srv.Close()
+
+	resp, err := Call(context.Background(), srv.Client(), "openai", srv.URL, "k", Request{
+		Op: OpResponses, Model: "m", ResponsesMode: ResponsesModeChatOnly,
+		Body: map[string]any{"input": "hi"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Router verification for the translated path runs against the Chat dialect,
+	// so the Chat finish reason must survive the Responses wrap.
+	if resp.FinishReason != "length" || !resp.HasContent {
+		t.Fatalf("want chat finish=length hasContent=true, got finish=%q has=%v", resp.FinishReason, resp.HasContent)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(resp.OpenAIBody, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if parsed["status"] != "incomplete" {
+		t.Fatalf("client body status=%v, want incomplete: %s", parsed["status"], resp.OpenAIBody)
+	}
+}
+
 func TestOpenAIResponsesChatOnlyNonPortable(t *testing.T) {
 	resp, err := Call(context.Background(), http.DefaultClient, "openai", "http://127.0.0.1:0", "k", Request{
 		Op: OpResponses, Model: "m", ResponsesMode: ResponsesModeChatOnly,

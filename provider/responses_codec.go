@@ -5,12 +5,23 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // PortableForChat reports whether a Responses request body can be translated
 // into Chat Completions (function tools + portable input items only).
 func PortableForChat(body map[string]any) error {
+	// Conversation state lives on the downstream /responses store; there is no
+	// way to reconstruct it for a stateless Chat Completions call.
+	if id, ok := body["previous_response_id"]; ok && id != nil {
+		if s, isStr := id.(string); !isStr || s != "" {
+			return fmt.Errorf("previous_response_id is not portable for chat")
+		}
+	}
 	if err := portableTools(body["tools"]); err != nil {
+		return err
+	}
+	if err := portableToolChoice(body["tool_choice"]); err != nil {
 		return err
 	}
 	return portableInput(body["input"])
@@ -35,6 +46,31 @@ func portableTools(raw any) error {
 		}
 	}
 	return nil
+}
+
+func portableToolChoice(raw any) error {
+	if raw == nil {
+		return nil
+	}
+	switch v := raw.(type) {
+	case string:
+		// "auto" / "none" / "required" mean the same thing in both dialects.
+		return nil
+	case map[string]any:
+		typ, _ := v["type"].(string)
+		if typ != "function" {
+			return fmt.Errorf("tool_choice: type %q is not portable for chat", typ)
+		}
+		if _, ok := v["function"].(map[string]any); ok {
+			return nil
+		}
+		if name, ok := v["name"].(string); ok && name != "" {
+			return nil
+		}
+		return fmt.Errorf("tool_choice: function choice missing name")
+	default:
+		return fmt.Errorf("tool_choice: non-portable shape")
+	}
 }
 
 func portableInput(raw any) error {
@@ -142,10 +178,18 @@ func ResponsesToChat(body map[string]any, model string) (map[string]any, error) 
 	if err != nil {
 		return nil, err
 	}
+	// Responses carries top-level instructions out of band; Chat only has the
+	// message list, so it becomes a leading system message.
+	if instructions, _ := body["instructions"].(string); instructions != "" {
+		msgs = append([]any{map[string]any{"role": "system", "content": instructions}}, msgs...)
+	}
 	out["messages"] = msgs
 
 	if tools, ok := body["tools"].([]any); ok {
 		out["tools"] = responsesToolsToChat(tools)
+	}
+	if choice, ok := responsesToolChoiceToChat(body["tool_choice"]); ok {
+		out["tool_choice"] = choice
 	}
 
 	if v, ok := body["max_output_tokens"]; ok {
@@ -154,14 +198,18 @@ func ResponsesToChat(body map[string]any, model string) (map[string]any, error) 
 
 	if text, ok := body["text"].(map[string]any); ok {
 		if format, ok := text["format"]; ok {
-			out["response_format"] = format
+			out["response_format"] = responsesFormatToChat(format)
 		}
 	}
 
+	// Responses-only knobs are dropped rather than forwarded: a Chat endpoint
+	// either ignores them or rejects the whole request as an unknown parameter.
 	consumed := map[string]struct{}{
 		"model":                {},
 		"input":                {},
+		"instructions":         {},
 		"tools":                {},
+		"tool_choice":          {},
 		"text":                 {},
 		"max_output_tokens":    {},
 		"max_tokens":           {},
@@ -169,6 +217,9 @@ func ResponsesToChat(body map[string]any, model string) (map[string]any, error) 
 		"stream_options":       {},
 		"previous_response_id": {},
 		"store":                {},
+		"reasoning":            {},
+		"include":              {},
+		"truncation":           {},
 	}
 	for k, v := range body {
 		if _, skip := consumed[k]; skip {
@@ -178,6 +229,57 @@ func ResponsesToChat(body map[string]any, model string) (map[string]any, error) 
 	}
 
 	return out, nil
+}
+
+// responsesFormatToChat converts a Responses text.format object into a Chat
+// response_format object. Responses spells json_schema flat (name/schema/strict
+// beside the type); Chat nests those fields under "json_schema".
+func responsesFormatToChat(raw any) any {
+	format, ok := raw.(map[string]any)
+	if !ok {
+		return raw
+	}
+	if typ, _ := format["type"].(string); typ != "json_schema" {
+		return format
+	}
+	if _, alreadyNested := format["json_schema"]; alreadyNested {
+		return format
+	}
+	inner := map[string]any{}
+	for _, k := range []string{"name", "description", "schema", "strict"} {
+		if v, ok := format[k]; ok {
+			inner[k] = v
+		}
+	}
+	return map[string]any{"type": "json_schema", "json_schema": inner}
+}
+
+// responsesToolChoiceToChat converts a Responses tool_choice into the Chat
+// shape. Reports false when there is nothing to forward.
+func responsesToolChoiceToChat(raw any) (any, bool) {
+	switch v := raw.(type) {
+	case nil:
+		return nil, false
+	case string:
+		if v == "" {
+			return nil, false
+		}
+		return v, true
+	case map[string]any:
+		if typ, _ := v["type"].(string); typ != "function" {
+			return nil, false
+		}
+		if _, ok := v["function"].(map[string]any); ok {
+			return v, true
+		}
+		name, _ := v["name"].(string)
+		if name == "" {
+			return nil, false
+		}
+		return map[string]any{"type": "function", "function": map[string]any{"name": name}}, true
+	default:
+		return nil, false
+	}
 }
 
 func responsesInputToMessages(raw any) ([]any, error) {
@@ -323,8 +425,10 @@ func stringifyAny(v any) (string, error) {
 }
 
 // ChatToResponses translates a Chat Completions response into a synthetic
-// Responses API object (message and/or function_call output items).
-func ChatToResponses(chatRaw []byte, model string) ([]byte, error) {
+// Responses API object (message and/or function_call output items). chatFinish
+// is the Chat finish_reason, which decides the Responses status: a truncated
+// reply becomes status "incomplete" so clients see it as such.
+func ChatToResponses(chatRaw []byte, model string, chatFinish string) ([]byte, error) {
 	var chat map[string]any
 	if err := json.Unmarshal(chatRaw, &chat); err != nil {
 		return nil, err
@@ -384,6 +488,10 @@ func ChatToResponses(chatRaw []byte, model string) ([]byte, error) {
 		"model":  model,
 		"output": output,
 		"usage":  usageOut,
+	}
+	if strings.EqualFold(chatFinish, "length") {
+		resp["status"] = "incomplete"
+		resp["incomplete_details"] = map[string]any{"reason": "max_output_tokens"}
 	}
 	return json.Marshal(resp)
 }
