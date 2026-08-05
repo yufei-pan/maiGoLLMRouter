@@ -86,6 +86,11 @@ type Provider struct {
 	FallbackKeys   []string // tried in order, never blacked out
 	FallbackModels []string // models allowed on fallback keys (empty => all allowed)
 
+	// SupportsResponses controls Responses API routing for kind=openai.
+	// nil = unset (probe then cache); non-nil true forces /responses;
+	// non-nil false forces Chat translation (never probe).
+	SupportsResponses *bool
+
 	fallbackModelSet map[string]bool
 }
 
@@ -147,13 +152,14 @@ type rawServer struct {
 }
 
 type rawProvider struct {
-	Name           string   `toml:"name"`
-	Kind           string   `toml:"kind"`
-	BaseURL        string   `toml:"base_url"`
-	Timeout        string   `toml:"timeout"`
-	Keys           []string `toml:"keys"`
-	FallbackKeys   []string `toml:"fallback_keys"`
-	FallbackModels []string `toml:"fallback_models"`
+	Name              string   `toml:"name"`
+	Kind              string   `toml:"kind"`
+	BaseURL           string   `toml:"base_url"`
+	Timeout           string   `toml:"timeout"`
+	Keys              []string `toml:"keys"`
+	FallbackKeys      []string `toml:"fallback_keys"`
+	FallbackModels    []string `toml:"fallback_models"`
+	SupportsResponses *bool    `toml:"supports_responses"`
 }
 
 type rawModel struct {
@@ -284,6 +290,10 @@ func build(raw rawConfig) (*Config, error) {
 		}
 		if hasTimeout {
 			p.Timeout = timeout
+		}
+		if rp.SupportsResponses != nil {
+			v := *rp.SupportsResponses
+			p.SupportsResponses = &v
 		}
 	}
 

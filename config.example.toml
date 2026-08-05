@@ -46,6 +46,9 @@ good_finish_reasons = ["stop", "length", "tool_calls", "function_call", "end_tur
 #                     If omitted but fallback_models is set, the normal keys are
 #                     reused for the fallback round (still never blacked out).
 #  - fallback_models: models permitted on the fallback round; empty = all allowed.
+#  - supports_responses: optional. true = always POST /responses;
+#    false = never probe, Chat-translate portable Responses inbound;
+#    omit = probe /responses once, cache Chat-only until config reload.
 # ---------------------------------------------------------------------------
 
 [[provider]]

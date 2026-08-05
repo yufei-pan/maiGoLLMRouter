@@ -262,3 +262,47 @@ targets = ["openai/a"]
 	}
 }
 
+func TestSupportsResponsesOptional(t *testing.T) {
+	path := writeTemp(t, `
+[[provider]]
+name = "a"
+kind = "openai"
+base_url = "https://a.example"
+keys = ["k"]
+
+[[provider]]
+name = "b"
+kind = "openai"
+base_url = "https://b.example"
+keys = ["k"]
+supports_responses = true
+
+[[provider]]
+name = "c"
+kind = "openai"
+base_url = "https://c.example"
+keys = ["k"]
+supports_responses = false
+
+[[provider]]
+name = "b"
+kind = "openai"
+base_url = "https://b2.example"
+keys = ["k2"]
+supports_responses = false
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Providers["a"].SupportsResponses != nil {
+		t.Fatalf("a: want unset nil, got %v", *cfg.Providers["a"].SupportsResponses)
+	}
+	if cfg.Providers["b"].SupportsResponses == nil || *cfg.Providers["b"].SupportsResponses {
+		t.Fatalf("b: later supports_responses=false should win, got %#v", cfg.Providers["b"].SupportsResponses)
+	}
+	if cfg.Providers["c"].SupportsResponses == nil || *cfg.Providers["c"].SupportsResponses {
+		t.Fatalf("c: want false, got %#v", cfg.Providers["c"].SupportsResponses)
+	}
+}
+
