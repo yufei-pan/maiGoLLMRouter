@@ -142,20 +142,42 @@ func isClaudeModelName(model string) bool {
 	return strings.HasPrefix(leaf, "claude-") || strings.HasPrefix(leaf, "anthropic.claude-")
 }
 
-// withClaudeTrailingUserCoercion returns a request whose last chat message is
-// role "user" when the resolved model is Claude. Downstream Anthropic (and
+// withClaudeTrailingUserCoercion returns a request whose last conversation turn
+// is role "user" when the resolved model is Claude. Downstream Anthropic (and
 // OpenAI-style proxies that translate to it) reject assistant prefill.
-// Applied for every outbound dialect; the shared inbound body is not mutated.
+//
+// For OpChat this rewrites Body["messages"]; for OpResponses it rewrites
+// Body["input"] role-based items. Typed Responses items (function_call, etc.)
+// are left alone. The shared inbound body is not mutated.
 func withClaudeTrailingUserCoercion(req Request) Request {
-	if req.Op != OpChat || !isClaudeModelName(req.Model) {
+	if !isClaudeModelName(req.Model) {
 		return req
 	}
-	msgs, ok := req.Body["messages"].([]any)
-	if !ok || len(msgs) == 0 {
+	switch req.Op {
+	case OpChat:
+		return coerceTrailingRole(req, "messages")
+	case OpResponses:
+		return coerceTrailingRole(req, "input")
+	default:
 		return req
 	}
-	last, ok := msgs[len(msgs)-1].(map[string]any)
-	if !ok || asString(last, "role") == "user" {
+}
+
+// coerceTrailingRole copies body[field] (a []any of message/input maps) and
+// forces the last role-bearing item to role "user" when it is not already.
+func coerceTrailingRole(req Request, field string) Request {
+	items, ok := req.Body[field].([]any)
+	if !ok || len(items) == 0 {
+		return req
+	}
+	last, ok := items[len(items)-1].(map[string]any)
+	if !ok {
+		return req
+	}
+	// Only rewrite role-based turns. Typed items (function_call, …) have no
+	// "role" and are not assistant text prefill.
+	role := asString(last, "role")
+	if role == "" || role == "user" {
 		return req
 	}
 
@@ -164,14 +186,14 @@ func withClaudeTrailingUserCoercion(req Request) Request {
 		copiedLast[k] = v
 	}
 	copiedLast["role"] = "user"
-	copiedMsgs := append([]any(nil), msgs...)
-	copiedMsgs[len(copiedMsgs)-1] = copiedLast
+	copiedItems := append([]any(nil), items...)
+	copiedItems[len(copiedItems)-1] = copiedLast
 
 	body := make(map[string]any, len(req.Body))
 	for k, v := range req.Body {
 		body[k] = v
 	}
-	body["messages"] = copiedMsgs
+	body[field] = copiedItems
 	req.Body = body
 	return req
 }

@@ -120,3 +120,49 @@ func TestCallLeavesTrailingAssistantForNonClaude(t *testing.T) {
 		t.Fatalf("trailing role = %v, want assistant", last["role"])
 	}
 }
+
+func TestCallCoercesTrailingAssistantForClaudeResponsesPassThrough(t *testing.T) {
+	var outbound map[string]any
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		defer r.Body.Close()
+		if err := json.NewDecoder(r.Body).Decode(&outbound); err != nil {
+			t.Fatalf("decode outbound body: %v", err)
+		}
+		fmt.Fprint(w, `{"id":"r1","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}`)
+	}))
+	defer srv.Close()
+
+	inboundInput := []any{
+		map[string]any{"role": "user", "content": "hi"},
+		map[string]any{"role": "assistant", "content": "prefill"},
+	}
+	req := Request{
+		Op:            OpResponses,
+		Model:         "claude-opus-5(max)",
+		ResponsesMode: ResponsesModeForce,
+		Body: map[string]any{
+			"model": "inbound",
+			"input": inboundInput,
+		},
+	}
+	if _, err := Call(context.Background(), srv.Client(), "openai", srv.URL, "key", req); err != nil {
+		t.Fatalf("Call error: %v", err)
+	}
+	if gotPath != "/responses" {
+		t.Fatalf("path = %q, want /responses", gotPath)
+	}
+	inp, ok := outbound["input"].([]any)
+	if !ok || len(inp) != 2 {
+		t.Fatalf("outbound input = %#v", outbound["input"])
+	}
+	last, ok := inp[1].(map[string]any)
+	if !ok || last["role"] != "user" || last["content"] != "prefill" {
+		t.Fatalf("trailing input = %#v, want user/prefill", inp[1])
+	}
+	origLast := inboundInput[1].(map[string]any)
+	if origLast["role"] != "assistant" {
+		t.Fatalf("inbound last role mutated to %v", origLast["role"])
+	}
+}
