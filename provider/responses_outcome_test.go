@@ -12,6 +12,7 @@ func TestResponsesOutcome(t *testing.T) {
 		{"text", `{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"hi"}]}]}`, "stop", true},
 		{"tools", `{"status":"completed","output":[{"type":"function_call","call_id":"c","name":"f","arguments":"{}"}]}`, "tool_calls", true},
 		{"reasoning", `{"status":"completed","output":[{"type":"reasoning","summary":[{"text":"think"}]}]}`, "stop", true},
+		{"reasoning_content", `{"status":"completed","output":[{"type":"reasoning","content":[{"type":"reasoning_text","text":"think"}]}]}`, "stop", true},
 		{"failed", `{"status":"failed","output":[]}`, "", false},
 		{"empty", `{"status":"completed","output":[]}`, "", false},
 	}

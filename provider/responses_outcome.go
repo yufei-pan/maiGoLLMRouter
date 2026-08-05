@@ -77,19 +77,31 @@ func responsesMessageHasContent(m map[string]any) bool {
 }
 
 func responsesReasoningHasContent(m map[string]any) bool {
-	if text, _ := m["reasoning_text"].(string); text != "" {
-		return true
+	// Prefer summary[].text (MaiBot shape); do not use a top-level reasoning_text field.
+	if summary, ok := m["summary"].([]any); ok {
+		for _, s := range summary {
+			sm, ok := s.(map[string]any)
+			if !ok {
+				continue
+			}
+			if text, _ := sm["text"].(string); text != "" {
+				return true
+			}
+		}
 	}
-	summary, ok := m["summary"].([]any)
+	content, ok := m["content"].([]any)
 	if !ok {
 		return false
 	}
-	for _, s := range summary {
-		sm, ok := s.(map[string]any)
+	for _, part := range content {
+		pm, ok := part.(map[string]any)
 		if !ok {
 			continue
 		}
-		if text, _ := sm["text"].(string); text != "" {
+		if pm["type"] != "reasoning_text" {
+			continue
+		}
+		if text, _ := pm["text"].(string); text != "" {
 			return true
 		}
 	}
