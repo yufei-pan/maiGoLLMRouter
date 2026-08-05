@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"encoding/json"
 	"fmt"
 )
 
@@ -195,6 +196,10 @@ func responsesInputToMessages(raw any) ([]any, error) {
 			return nil, fmt.Errorf("input item: unexpected shape")
 		}
 		if typ, _ := m["type"].(string); typ == "function_call" {
+			args, err := stringifyAny(m["arguments"])
+			if err != nil {
+				return nil, fmt.Errorf("function_call arguments: %w", err)
+			}
 			msgs = append(msgs, map[string]any{
 				"role": "assistant",
 				"tool_calls": []any{
@@ -203,7 +208,7 @@ func responsesInputToMessages(raw any) ([]any, error) {
 						"type": "function",
 						"function": map[string]any{
 							"name":      m["name"],
-							"arguments": stringifyAny(m["arguments"]),
+							"arguments": args,
 						},
 					},
 				},
@@ -211,10 +216,14 @@ func responsesInputToMessages(raw any) ([]any, error) {
 			continue
 		}
 		if typ, _ := m["type"].(string); typ == "function_call_output" {
+			content, err := stringifyAny(m["output"])
+			if err != nil {
+				return nil, fmt.Errorf("function_call_output: %w", err)
+			}
 			msgs = append(msgs, map[string]any{
 				"role":         "tool",
 				"tool_call_id": m["call_id"],
-				"content":      stringifyAny(m["output"]),
+				"content":      content,
 			})
 			continue
 		}
@@ -247,7 +256,11 @@ func responsesContentToChat(raw any) (any, error) {
 			typ, _ := pm["type"].(string)
 			switch typ {
 			case "input_text", "output_text", "text":
-				parts = append(parts, map[string]any{"type": "text", "text": stringifyAny(pm["text"])})
+				text, err := stringifyAny(pm["text"])
+				if err != nil {
+					return nil, fmt.Errorf("text part: %w", err)
+				}
+				parts = append(parts, map[string]any{"type": "text", "text": text})
 			case "input_image", "image_url":
 				img := pm["image_url"]
 				if s, ok := img.(string); ok {
@@ -292,13 +305,17 @@ func responsesToolsToChat(tools []any) []any {
 	return out
 }
 
-func stringifyAny(v any) string {
+func stringifyAny(v any) (string, error) {
 	switch s := v.(type) {
 	case string:
-		return s
+		return s, nil
 	case nil:
-		return ""
+		return "", nil
 	default:
-		return fmt.Sprint(s)
+		b, err := json.Marshal(s)
+		if err != nil {
+			return "", err
+		}
+		return string(b), nil
 	}
 }
