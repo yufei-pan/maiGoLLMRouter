@@ -304,18 +304,20 @@ func responsesInputToMessages(raw any) ([]any, error) {
 			if err != nil {
 				return nil, fmt.Errorf("function_call arguments: %w", err)
 			}
-			msgs = append(msgs, map[string]any{
-				"role": "assistant",
-				"tool_calls": []any{
-					map[string]any{
-						"id":   m["call_id"],
-						"type": "function",
-						"function": map[string]any{
-							"name":      m["name"],
-							"arguments": args,
-						},
-					},
+			tc := map[string]any{
+				"id":   m["call_id"],
+				"type": "function",
+				"function": map[string]any{
+					"name":      m["name"],
+					"arguments": args,
 				},
+			}
+			if sig := thoughtSignatureFrom(m); sig != "" {
+				tc["thought_signature"] = sig
+			}
+			msgs = append(msgs, map[string]any{
+				"role":       "assistant",
+				"tool_calls": []any{tc},
 			})
 			continue
 		}
@@ -459,12 +461,16 @@ func ChatToResponses(chatRaw []byte, model string, chatFinish string) ([]byte, e
 					if err != nil {
 						return nil, fmt.Errorf("tool_call arguments: %w", err)
 					}
-					output = append(output, map[string]any{
+					item := map[string]any{
 						"type":      "function_call",
 						"call_id":   tcm["id"],
 						"name":      fn["name"],
 						"arguments": args,
-					})
+					}
+					if sig := thoughtSignatureFrom(tcm); sig != "" {
+						item["thought_signature"] = sig
+					}
+					output = append(output, item)
 				}
 			}
 		}

@@ -170,7 +170,8 @@ func isProhibitedContent(raw []byte) bool {
 	_ = json.Unmarshal(raw, &parsed)
 	if matchesProhibited(parsed.Error.Message) || matchesProhibited(parsed.Error.Status) ||
 		matchesProhibited(fmt.Sprint(parsed.Error.Code)) ||
-		matchesProhibited(parsed.PromptFeedback.BlockReason) {
+		matchesProhibited(parsed.PromptFeedback.BlockReason) ||
+		isGeminiPolicyBlock(parsed.PromptFeedback.BlockReason) {
 		return true
 	}
 	// Responses API policy blocks often arrive as incomplete + content_filter
@@ -182,7 +183,7 @@ func isProhibitedContent(raw []byte) bool {
 		return true
 	}
 	for _, c := range parsed.Candidates {
-		if matchesProhibited(c.FinishReason) {
+		if matchesProhibited(c.FinishReason) || isGeminiPolicyBlock(c.FinishReason) {
 			return true
 		}
 	}
@@ -210,6 +211,18 @@ func isContentFilterFinish(s string) bool {
 
 func matchesProhibited(s string) bool {
 	return strings.EqualFold(strings.TrimSpace(s), ProhibitedContentMarker)
+}
+
+// isGeminiPolicyBlock reports Gemini finish/block reasons that are
+// content-policy decisions (the same class we map to OpenAI content_filter).
+func isGeminiPolicyBlock(s string) bool {
+	switch strings.ToUpper(strings.TrimSpace(s)) {
+	case "SAFETY", "RECITATION", "BLOCKLIST",
+		"PROHIBITED_CONTENT", "IMAGE_SAFETY", "SPII":
+		return true
+	default:
+		return false
+	}
 }
 
 // doJSON sends a JSON request and returns the status and raw body.

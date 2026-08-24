@@ -282,6 +282,51 @@ targets = ["openai/real-model"]
 	}
 }
 
+const geminiSafetyBody = `{"candidates":[{"content":{"parts":[{"text":""}],"role":"model"},"finishReason":"SAFETY"}],"promptFeedback":{"blockReason":"SAFETY"}}`
+
+func TestGeminiSafetyTreatedAsProhibited(t *testing.T) {
+	for _, op := range []provider.Operation{provider.OpChat, provider.OpResponses} {
+		t.Run(fmt.Sprintf("op=%d", op), func(t *testing.T) {
+			var calls int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				fmt.Fprint(w, geminiSafetyBody)
+			}))
+			defer srv.Close()
+
+			cfg := loadCfg(t, fmt.Sprintf(`
+[[provider]]
+name = "google"
+kind = "gemini"
+base_url = %q
+keys = ["n1","n2"]
+fallback_keys = ["f1"]
+
+[model."m"]
+targets = ["google/gemini-flash"]
+`, srv.URL))
+
+			r := New(cfg)
+			res := r.Execute(context.Background(), op, "m", map[string]any{"model": "m", "input": "hi", "messages": []any{map[string]any{"role": "user", "content": "hi"}}})
+			if res.Success {
+				t.Fatal("expected non-success for Gemini SAFETY")
+			}
+			if calls != 1 {
+				t.Errorf("calls = %d, want 1 (no other keys, no fallback)", calls)
+			}
+			if len(res.Attempts) != 1 || res.Attempts[0].Outcome != "prohibited_content" {
+				t.Fatalf("unexpected attempts: %+v", res.Attempts)
+			}
+			if res.Status != http.StatusForbidden {
+				t.Errorf("status = %d, want 403", res.Status)
+			}
+			if r.blackout.Blocked("n1", "gemini-flash") || r.blackout.Blocked("n2", "gemini-flash") {
+				t.Errorf("Gemini SAFETY is a policy block, must not black out the key")
+			}
+		})
+	}
+}
+
 func TestExecuteStripsStreamingControlsForOpenAIProvider(t *testing.T) {
 	var sawStream bool
 	var calls int
@@ -613,6 +658,44 @@ targets = ["openai/real-model"]
 	}
 	if r.blackout.Blocked("n1", "real-model") {
 		t.Errorf("bad output must not black out the normal key")
+	}
+}
+
+func TestResponsesViaGeminiTarget(t *testing.T) {
+	var path string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		if r.Header.Get("x-goog-api-key") == "" {
+			t.Errorf("missing x-goog-api-key")
+		}
+		fmt.Fprint(w, `{"candidates":[{"content":{"parts":[{"text":"hi"}],"role":"model"},"finishReason":"STOP"}]}`)
+	}))
+	defer srv.Close()
+
+	cfg := loadCfg(t, fmt.Sprintf(`
+[[provider]]
+name = "google"
+kind = "gemini"
+base_url = %q
+keys = ["gk"]
+
+[model."m"]
+targets = ["google/gemini-2.5-flash"]
+`, srv.URL))
+
+	res := New(cfg).Execute(context.Background(), provider.OpResponses, "m", responsesReq())
+	if !res.Success {
+		t.Fatalf("expected success via gemini translation, attempts=%+v body=%s", res.Attempts, res.Body)
+	}
+	if !strings.Contains(path, "/models/gemini-2.5-flash:generateContent") {
+		t.Fatalf("path=%q, want generateContent", path)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(res.Body, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if parsed["object"] != "response" || parsed["status"] != "completed" {
+		t.Fatalf("client body not Responses-shaped: %s", res.Body)
 	}
 }
 

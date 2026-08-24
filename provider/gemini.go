@@ -18,6 +18,12 @@ var geminiConsumed = map[string]bool{
 	"encoding_format": true, "dimensions": true, "user": true,
 	"tools": true, "tool_choice": true, "functions": true, "function_call": true,
 	"response_format": true,
+	// OpenAI-only fields. Passing them through into generationConfig makes
+	// Gemini 400 on unknown names (Responses clients often send these).
+	"parallel_tool_calls": true, "metadata": true, "service_tier": true,
+	"max_tool_calls": true, "prompt_cache_key": true, "safety_identifier": true,
+	"logprobs": true, "top_logprobs": true, "store": true, "include": true,
+	"reasoning": true, "truncation": true, "background": true,
 }
 
 // geminiTopLevel lists generateContent request fields that belong at the top
@@ -289,12 +295,23 @@ func assistantToolCallParts(v any) []map[string]any {
 		if as, ok := fn["arguments"].(string); ok && as != "" {
 			_ = json.Unmarshal([]byte(as), &args)
 		}
-		parts = append(parts, map[string]any{"functionCall": map[string]any{
+		part := map[string]any{"functionCall": map[string]any{
 			"name": asString(fn, "name"),
 			"args": args,
-		}})
+		}}
+		if sig := thoughtSignatureFrom(tcm); sig != "" {
+			part["thoughtSignature"] = sig
+		}
+		parts = append(parts, part)
 	}
 	return parts
+}
+
+func thoughtSignatureFrom(m map[string]any) string {
+	if s := asString(m, "thought_signature"); s != "" {
+		return s
+	}
+	return asString(m, "thoughtSignature")
 }
 
 // toolResponsePart converts an OpenAI tool/function result message into a Gemini
@@ -463,8 +480,11 @@ func geminiToOpenAIChat(raw []byte, model string) (openAIBody []byte, finish str
 		Candidates []struct {
 			Content struct {
 				Parts []struct {
-					Text         string `json:"text"`
-					FunctionCall *struct {
+					Text                  string `json:"text"`
+					Thought               bool   `json:"thought"`
+					ThoughtSignature      string `json:"thoughtSignature"`
+					ThoughtSignatureSnake string `json:"thought_signature"`
+					FunctionCall          *struct {
 						Name string         `json:"name"`
 						Args map[string]any `json:"args"`
 					} `json:"functionCall"`
@@ -492,14 +512,25 @@ func geminiToOpenAIChat(raw []byte, model string) (openAIBody []byte, finish str
 				if args == nil {
 					args = map[string]any{}
 				}
-				toolCalls = append(toolCalls, map[string]any{
+				tc := map[string]any{
 					"id":   "call_" + randomID(),
 					"type": "function",
 					"function": map[string]any{
 						"name":      p.FunctionCall.Name,
 						"arguments": string(mustJSON(args)),
 					},
-				})
+				}
+				if sig := p.ThoughtSignature; sig != "" || p.ThoughtSignatureSnake != "" {
+					if sig == "" {
+						sig = p.ThoughtSignatureSnake
+					}
+					tc["thought_signature"] = sig
+				}
+				toolCalls = append(toolCalls, tc)
+				continue
+			}
+			// Thought summaries are internal reasoning, not assistant content.
+			if p.Thought {
 				continue
 			}
 			text.WriteString(p.Text)
@@ -548,11 +579,12 @@ func normalizeGeminiFinish(r string) string {
 		return "stop"
 	case "MAX_TOKENS":
 		return "length"
-	case "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT":
-		return "content_filter"
 	case "":
 		return ""
 	default:
+		if isGeminiPolicyBlock(r) {
+			return "content_filter"
+		}
 		return strings.ToLower(r)
 	}
 }
