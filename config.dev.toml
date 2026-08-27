@@ -1,0 +1,15 @@
+# Local dev config for cloud agent demos (mock upstream provider).
+[server]
+listen = ":8470"
+log_dir = "./logs"
+client_keys = ["sk-local-dev-key"]
+
+[[provider]]
+name = "mock"
+kind = "openai"
+base_url = "http://127.0.0.1:9999"
+timeout = "30s"
+keys = ["mock-upstream-key"]
+
+[model."demo"]
+targets = ["mock/gpt-demo"]
