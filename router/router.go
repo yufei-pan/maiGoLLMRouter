@@ -244,9 +244,11 @@ func (r *Router) Execute(ctx context.Context, op provider.Operation, inboundMode
 //
 // A key is never retried in place. A bad output advances to the next key
 // without blackout (empty/unfinished HTTP 200 bodies are not a key-health
-// signal). A provider error blacks out the normal key and advances. Retrying
-// the same key would burn the key's rate limit (RPM) without changing a
-// deterministic-looking failure, so the router moves on.
+// signal). A provider error blacks out the normal key and advances. A
+// successful reply clears that (key, model) pair so a recovered key is
+// eligible again immediately. Retrying the same key would burn the key's
+// rate limit (RPM) without changing a deterministic-looking failure, so
+// the router moves on.
 func (r *Router) tryKey(ctx context.Context, res *Result, p *config.Provider, model string, op provider.Operation, body map[string]any, key, keyType string, last **provider.Response) (done, skip bool) {
 	resp, att, oc := r.callOnce(ctx, p, model, op, body, key, keyType)
 	res.Attempts = append(res.Attempts, att)
@@ -258,6 +260,7 @@ func (r *Router) tryKey(ctx context.Context, res *Result, p *config.Provider, mo
 	}
 	switch oc {
 	case outcomeSuccess:
+		r.blackout.Success(key, model)
 		res.Success = true
 		res.Status = resp.HTTPStatus
 		res.Body = resp.OpenAIBody

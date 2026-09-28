@@ -15,7 +15,7 @@ type blackoutKey struct {
 
 // Blackout tracks (API key, model) combinations that recently failed. A
 // blacked-out combination is skipped during normal-key selection until its
-// blackout window expires.
+// blackout window expires, or until that pair returns a successful reply.
 type Blackout struct {
 	mu    sync.Mutex
 	until map[blackoutKey]time.Time
@@ -42,6 +42,15 @@ func (b *Blackout) Fail(key, model string) {
 	}
 	b.mu.Lock()
 	b.until[blackoutKey{key: key, model: model}] = time.Now().Add(b.dur)
+	b.mu.Unlock()
+}
+
+// Success removes an (API key, model) combination from the blackout list.
+// A successful reply is treated as a live health signal for that pair, so a
+// prior failure no longer keeps the key skipped for this model.
+func (b *Blackout) Success(key, model string) {
+	b.mu.Lock()
+	delete(b.until, blackoutKey{key: key, model: model})
 	b.mu.Unlock()
 }
 

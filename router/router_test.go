@@ -117,6 +117,58 @@ targets = ["openai/real-model"]
 	}
 }
 
+// TestSuccessClearsKeyModelBlackout verifies that a successful downstream
+// reply lifts that (key, model) pair. The same key stays blacked out for other
+// models, and other keys stay blacked out for this model. The success path
+// uses fallback-key reuse of the normal key so Execute actually calls the
+// pair after Fail (phase 1 skips blacked-out normal keys).
+func TestSuccessClearsKeyModelBlackout(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, `{"error":"boom"}`)
+			return
+		}
+		fmt.Fprint(w, chatStop)
+	}))
+	defer srv.Close()
+
+	cfg := loadCfg(t, fmt.Sprintf(`
+[[provider]]
+name = "openai"
+kind = "openai"
+base_url = %q
+keys = ["n1"]
+fallback_models = ["real-model"]
+
+[model."m"]
+targets = ["openai/real-model"]
+`, srv.URL))
+
+	r := New(cfg)
+	r.blackout.Fail("n1", "other-model")
+	r.blackout.Fail("n2", "real-model")
+
+	res := r.Execute(context.Background(), provider.OpChat, "m", chatReq())
+	if !res.Success {
+		t.Fatalf("expected success after fallback reuse, attempts=%+v", res.Attempts)
+	}
+	if calls != 2 {
+		t.Errorf("calls = %d, want 2 (phase-1 fail then fallback success)", calls)
+	}
+	if r.blackout.Blocked("n1", "real-model") {
+		t.Error("successful reply must remove that key/model from the blackout list")
+	}
+	if !r.blackout.Blocked("n1", "other-model") {
+		t.Error("success must not clear a different model on the same key")
+	}
+	if !r.blackout.Blocked("n2", "real-model") {
+		t.Error("success must not clear a different key on the same model")
+	}
+}
+
 // TestHTTP400DoesNotBlackout verifies a downstream HTTP 400 (client/request
 // error) is not treated as a key/model/provider fault: normal keys stay usable.
 func TestHTTP400DoesNotBlackout(t *testing.T) {
