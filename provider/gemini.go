@@ -149,6 +149,11 @@ func buildGeminiChatBody(req Request) map[string]any {
 					genCfg[gk] = gv
 				}
 			}
+		case k == "extra_body":
+			// OpenAI-compat clients put Gemini fields under extra_body.google
+			// (sometimes double-wrapped). Native generateContent rejects
+			// extra_body inside generationConfig.
+			applyGeminiExtraBody(genCfg, v)
 		case geminiTopLevel[k]:
 			topLevel[k] = v
 		default:
@@ -175,6 +180,40 @@ func buildGeminiChatBody(req Request) map[string]any {
 		body["generationConfig"] = genCfg
 	}
 	return body
+}
+
+func applyGeminiExtraBody(genCfg map[string]any, v any) {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return
+	}
+	if inner, ok := m["extra_body"]; ok {
+		applyGeminiExtraBody(genCfg, inner)
+	}
+	google, _ := m["google"].(map[string]any)
+	if google == nil {
+		return
+	}
+	tc := google["thinking_config"]
+	if tc == nil {
+		tc = google["thinkingConfig"]
+	}
+	tcMap, ok := tc.(map[string]any)
+	if !ok {
+		return
+	}
+	existing, _ := genCfg["thinkingConfig"].(map[string]any)
+	if existing == nil {
+		copied := make(map[string]any, len(tcMap))
+		for k, val := range tcMap {
+			copied[k] = val
+		}
+		genCfg["thinkingConfig"] = copied
+		return
+	}
+	for k, val := range tcMap {
+		existing[k] = val
+	}
 }
 
 // collectToolCallNames maps each assistant tool_call id to its function name so
