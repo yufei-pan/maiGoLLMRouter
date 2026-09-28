@@ -590,16 +590,13 @@ func normalizeGeminiFinish(r string) string {
 }
 
 func geminiEmbed(ctx context.Context, client *http.Client, baseURL, apiKey string, req Request) (*Response, error) {
-	inputs := embedInputs(req.Body["input"])
+	contents := geminiEmbedContents(req.Body["input"])
 	modelPath := geminiModelPath(req.Model)
 	url := baseURL + "/" + modelPath + ":batchEmbedContents"
 
-	reqs := make([]map[string]any, 0, len(inputs))
-	for _, in := range inputs {
-		reqs = append(reqs, map[string]any{
-			"model":   modelPath,
-			"content": map[string]any{"parts": []map[string]any{{"text": in}}},
-		})
+	reqs := make([]map[string]any, 0, len(contents))
+	for _, c := range contents {
+		reqs = append(reqs, map[string]any{"model": modelPath, "content": c})
 	}
 	out := mustJSON(map[string]any{"requests": reqs})
 	headers := map[string]string{"x-goog-api-key": apiKey}
@@ -636,20 +633,46 @@ func geminiEmbed(ctx context.Context, client *http.Client, baseURL, apiKey strin
 	return resp, nil
 }
 
-// embedInputs normalizes the OpenAI "input" field (string or []string/[]any)
-// into a slice of strings.
-func embedInputs(v any) []string {
+// geminiEmbedContents converts the OpenAI "input" field (a string, an object,
+// or an array of either) into one Gemini content per item, i.e. one embedding
+// per item. Strings become text parts. Objects may carry "text", "image"
+// (SiliconFlow/Jina style, as sent by MaiBot's image_embedding_input
+// template) and/or "image_url" (OpenAI content part); several parts in one
+// object yield a single aggregated multimodal embedding.
+func geminiEmbedContents(v any) []map[string]any {
+	var items []any
 	switch in := v.(type) {
-	case string:
-		return []string{in}
+	case string, map[string]any:
+		items = []any{in}
 	case []any:
-		out := make([]string, 0, len(in))
-		for _, e := range in {
-			if s, ok := e.(string); ok {
-				out = append(out, s)
+		items = in
+	default:
+		return nil
+	}
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		if parts := geminiEmbedParts(item); len(parts) > 0 {
+			out = append(out, map[string]any{"parts": parts})
+		}
+	}
+	return out
+}
+
+func geminiEmbedParts(item any) []map[string]any {
+	switch it := item.(type) {
+	case string:
+		return []map[string]any{{"text": it}}
+	case map[string]any:
+		var parts []map[string]any
+		if t := asString(it, "text"); t != "" {
+			parts = append(parts, map[string]any{"text": t})
+		}
+		for _, k := range []string{"image", "image_url"} {
+			if block := geminiImagePart(it[k]); block != nil {
+				parts = append(parts, block)
 			}
 		}
-		return out
+		return parts
 	default:
 		return nil
 	}
