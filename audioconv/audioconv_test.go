@@ -182,3 +182,36 @@ func TestConvertClampsPCMRate(t *testing.T) {
 		t.Errorf("100 samples became %d bytes: the rate was not clamped", len(out))
 	}
 }
+
+// makeVideoClip writes a one-second clip with a video stream (and an audio
+// stream when withAudio), as a client could upload it.
+func makeVideoClip(t *testing.T, ffmpeg string, withAudio bool) []byte {
+	t.Helper()
+	path := t.TempDir() + "/clip.webm"
+	args := []string{"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=160x120:rate=10:duration=1"}
+	if withAudio {
+		args = append(args, "-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-c:a", "libopus", "-shortest")
+	}
+	args = append(args, "-c:v", "libvpx", "-f", "webm", "-y", path)
+	if out, err := exec.Command(ffmpeg, args...).CombinedOutput(); err != nil {
+		t.Skipf("can't make a video clip here: %v %s", err, out)
+	}
+	b, _ := os.ReadFile(path)
+	return b
+}
+
+// TestConvertDropsVideo verifies only the audio of an upload is decoded and
+// kept: a video stream never reaches a decoder or the output.
+func TestConvertDropsVideo(t *testing.T) {
+	ffmpeg := needFFmpeg(t)
+	out, ct, err := Convert(context.Background(), ffmpeg, makeVideoClip(t, ffmpeg, true), "audio/webm", "opus")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ct != "audio/ogg" || bytes.Contains(out, []byte("theora")) || !bytes.Contains(out, []byte("OpusHead")) {
+		t.Errorf("type %q; output carries video: %v", ct, bytes.Contains(out, []byte("theora")))
+	}
+	if _, _, err := Convert(context.Background(), ffmpeg, makeVideoClip(t, ffmpeg, false), "audio/webm", "opus"); err == nil {
+		t.Error("a video-only upload should fail, not turn into a video")
+	}
+}

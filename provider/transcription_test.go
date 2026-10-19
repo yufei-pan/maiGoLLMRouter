@@ -230,3 +230,51 @@ func TestStepfunErrorEventsBlackOutOnlyForKeyFaults(t *testing.T) {
 		}
 	}
 }
+
+// TestOpenAITranscriptionFilenameFollowsFormat verifies the upload's name tells
+// an OpenAI-kind provider the format the router decided on: a name whose
+// extension says otherwise (or nothing) is replaced.
+func TestOpenAITranscriptionFilenameFollowsFormat(t *testing.T) {
+	for _, c := range []struct{ in, format, want string }{
+		{"blob", "wav", "speech.wav"},
+		{"clip.weba", "webm", "speech.webm"},
+		{"voice.mp3", "mp3", "voice.mp3"},
+		{"", "ogg", "speech.ogg"},
+	} {
+		var got string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if err := r.ParseMultipartForm(1 << 20); err == nil {
+				if _, h, err := r.FormFile("file"); err == nil {
+					got = h.Filename
+				}
+			}
+			fmt.Fprint(w, `{"text":"hi"}`)
+		}))
+		_, _ = Call(context.Background(), srv.Client(), "openai", srv.URL, "k",
+			transcribeReq("whisper", "openai", TranscriptionRequest{Audio: []byte("x"), Format: c.format, Filename: c.in}))
+		srv.Close()
+		if got != c.want {
+			t.Errorf("%q as %s: sent %q, want %q", c.in, c.format, got, c.want)
+		}
+	}
+}
+
+// TestGeminiTranscriptionNonStopIsNotSilence verifies only a normal finish with
+// no text counts as silence; any other finish without text is a failure, so
+// the next target gets a chance at the user's words.
+func TestGeminiTranscriptionNonStopIsNotSilence(t *testing.T) {
+	for reply, want := range map[string]bool{
+		`{"candidates":[{"finishReason":"MAX_TOKENS"}]}`:                                     false,
+		`{"candidates":[{"content":{"parts":[]},"finishReason":"OTHER"}]}`:                   false,
+		`{"candidates":[{"content":{"parts":[]},"finishReason":"STOP"}]}`:                    true,
+		`{"candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"MAX_TOKENS"}]}`: true,
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, reply) }))
+		resp, _ := Call(context.Background(), srv.Client(), "gemini", srv.URL, "k",
+			transcribeReq("gemini-3.5-flash", "", TranscriptionRequest{Audio: []byte("RIFF"), Format: "wav"}))
+		srv.Close()
+		if resp.HasContent != want {
+			t.Errorf("%s: HasContent %v, want %v", reply, resp.HasContent, want)
+		}
+	}
+}

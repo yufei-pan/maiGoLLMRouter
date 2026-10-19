@@ -48,6 +48,11 @@ var encodings = map[string]encoding{
 // inputFormats are the ffmpeg demuxers audio may arrive in.
 const inputFormats = "wav,ogg,mp3,flac,aac,matroska,webm,mov,mp4,m4a,s16le"
 
+// inputCodecs are the decoders ffmpeg may run on that audio: audio only, so a
+// video stream in an upload never reaches a decoder.
+const inputCodecs = "opus,libopus,vorbis,mp3,mp3float,aac,aac_fixed,libfdk_aac,flac,alac," +
+	"pcm_s16le,pcm_s16be,pcm_s24le,pcm_s32le,pcm_f32le,pcm_u8,pcm_mulaw,pcm_alaw"
+
 // ContentTypeFor is the content type of a speech format, or "" for an unknown one.
 func ContentTypeFor(format string) string {
 	return encodings[format].contentType
@@ -129,12 +134,12 @@ func Convert(ctx context.Context, ffmpeg string, data []byte, contentType, forma
 	// is handed, and only as an audio container, never a playlist or a list
 	// of other files.
 	args := []string{"-hide_banner", "-loglevel", "error",
-		"-protocol_whitelist", "pipe", "-format_whitelist", inputFormats}
+		"-protocol_whitelist", "pipe", "-format_whitelist", inputFormats, "-codec_whitelist", inputCodecs}
 	if IsRawPCM(contentType) {
 		rate := min(max(PCMRate(contentType), minPCMRate), maxPCMRate)
 		args = append(args, "-f", "s16le", "-ar", strconv.Itoa(rate), "-ac", "1")
 	}
-	args = append(args, "-i", "pipe:0")
+	args = append(args, "-i", "pipe:0", "-map", "0:a:0", "-vn", "-sn", "-dn") // the first audio stream, nothing else
 	args = append(args, enc.args...)
 	args = append(args, "pipe:1")
 

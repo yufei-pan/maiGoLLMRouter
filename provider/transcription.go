@@ -9,6 +9,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -54,8 +55,10 @@ func openAITranscription(ctx context.Context, client *http.Client, baseURL, apiK
 	tr := req.Transcription
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
+	// The name tells the provider the format: keep the client's only when its
+	// extension says the format the router decided on.
 	name := tr.Filename
-	if name == "" {
+	if f, ok := NormalizeAudioFormat(filepath.Ext(name)); !ok || f != tr.Format {
 		name = "speech." + tr.Format
 	}
 	fw, err := mw.CreateFormFile("file", name)
@@ -252,6 +255,7 @@ func geminiTranscription(ctx context.Context, client *http.Client, baseURL, apiK
 					Thought bool   `json:"thought"`
 				} `json:"parts"`
 			} `json:"content"`
+			FinishReason string `json:"finishReason"`
 		} `json:"candidates"`
 	}
 	if json.Unmarshal(raw, &g) != nil || len(g.Candidates) == 0 {
@@ -263,6 +267,12 @@ func geminiTranscription(ctx context.Context, client *http.Client, baseURL, apiK
 			text.WriteString(p.Text)
 		}
 	}
-	resp.OpenAIBody, resp.HasContent = mustJSON(map[string]any{"text": strings.TrimSpace(text.String())}), true
+	t := strings.TrimSpace(text.String())
+	if t == "" && g.Candidates[0].FinishReason != "STOP" {
+		// No text and no normal finish: Gemini stopped for another reason, which
+		// is not silence. Fail, so the next target hears the user out.
+		return resp, nil
+	}
+	resp.OpenAIBody, resp.HasContent = mustJSON(map[string]any{"text": t}), true
 	return resp, nil
 }

@@ -58,6 +58,15 @@ func (r *Router) executeAudio(ctx context.Context, st *routerState, op provider.
 		start := time.Now()
 		resp, err := provider.Call(actx, st.streamClients[p.Name], p.Kind, p.BaseURL, key, req)
 		att.LatencyMS = time.Since(start).Milliseconds()
+		if op == provider.OpTranscribe && ctx.Err() == nil && actx.Err() == context.DeadlineExceeded {
+			// How long transcription takes depends on the clip, which the client
+			// chooses, and the same key may serve chat: out of time is a
+			// failover, not a sign of a bad key.
+			if resp == nil {
+				resp = &provider.Response{}
+			}
+			resp.NoBlackout = true
+		}
 		// judge gets the inbound context: running out of time is the
 		// provider's fault, the caller going away is not.
 		att, oc := r.judge(ctx, st, p, model, op, key, resp, err, att)

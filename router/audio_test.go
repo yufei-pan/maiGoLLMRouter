@@ -179,6 +179,36 @@ targets = ["openrouter/tts", "google/g-tts"]
 	if !res.Success || len(res.Attempts) != 2 || res.Attempts[0].Outcome != "provider_error" {
 		t.Fatalf("result = %+v", res)
 	}
+	if !r.blackout.Blocked("ko", "tts") {
+		t.Error("a speech target that hangs should be blacked out (spec D23)")
+	}
+}
+
+// TestTranscriptionTimeoutDoesNotBlackOut verifies a transcription that runs
+// out of time fails over without blackout: how long it takes depends on the
+// clip, which the client chooses, and the same key may serve chat.
+func TestTranscriptionTimeoutDoesNotBlackOut(t *testing.T) {
+	r := audioProviders{
+		openrouter: func(w http.ResponseWriter, r *http.Request) {
+			select {
+			case <-r.Context().Done():
+			case <-time.After(time.Second):
+			}
+		},
+		google: func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"candidates":[{"content":{"parts":[{"text":"hello"}]},"finishReason":"STOP"}]}`)
+		},
+	}.config(t, `audio_timeout = "100ms"`, `
+[model."listen"]
+targets = ["openrouter/whisper", "google/g-flash"]
+`)
+	res := r.ExecuteTranscription(context.Background(), "listen", provider.TranscriptionRequest{Audio: []byte("RIFF"), Format: "wav"})
+	if !res.Success || res.Attempts[0].Outcome != "provider_error" {
+		t.Fatalf("result = %+v", res)
+	}
+	if r.blackout.Blocked("ko", "whisper") {
+		t.Error("a transcription timeout must not black out the key")
+	}
 }
 
 func TestAudioOnAnthropicOnly(t *testing.T) {
