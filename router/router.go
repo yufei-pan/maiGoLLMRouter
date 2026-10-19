@@ -97,6 +97,8 @@ type Result struct {
 	// Committed reports that the reply went out through a StreamSink; when
 	// false, Status and Body are to be sent as a JSON reply.
 	Committed bool `json:"-"`
+	// ContentType is the type of a speech reply's audio, as the provider sent it.
+	ContentType string `json:"-"`
 }
 
 type outcome int
@@ -427,7 +429,7 @@ func (r *Router) judge(ctx context.Context, st *routerState, p *config.Provider,
 // outputOK applies output verification: chat responses must have content and a
 // finish reason in the configured good set; embeddings must carry data (#5).
 func (st *routerState) outputOK(op provider.Operation, resp *provider.Response) bool {
-	if op == provider.OpEmbed {
+	if op == provider.OpEmbed || op == provider.OpSpeech || op == provider.OpTranscribe {
 		return resp.HasContent
 	}
 	if !resp.HasContent {
