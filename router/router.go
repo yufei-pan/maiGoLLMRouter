@@ -10,52 +10,56 @@ import (
 	"math/rand"
 	"net/http"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"time"
 
 	"maiGoLLMRouter/config"
 	"maiGoLLMRouter/provider"
 )
 
-// Router holds resolved configuration and per-provider HTTP clients.
+// Router holds the current routing state and the key blackout, which outlives
+// config reloads.
 type Router struct {
-	mu       sync.RWMutex
-	cfg      *config.Config
+	state    atomic.Pointer[routerState]
 	blackout *Blackout
+}
+
+// routerState is one configuration's view of the downstreams: the config, its
+// per-provider HTTP clients, and the Responses verdicts learned under it. A
+// request loads it once and keeps it to the end, so a reload never waits for
+// requests already being routed and never changes them midway.
+type routerState struct {
+	cfg      *config.Config
 	clients  map[string]*http.Client
 	respCaps *responsesCapability
 }
 
-// New builds a Router from the resolved configuration.
-func New(cfg *config.Config) *Router {
-	r := &Router{
+func newRouterState(cfg *config.Config) *routerState {
+	st := &routerState{
 		cfg:      cfg,
-		blackout: NewBlackout(cfg.Server.GlobalBlackout),
 		clients:  make(map[string]*http.Client, len(cfg.Providers)),
 		respCaps: newResponsesCapability(),
 	}
 	for name, p := range cfg.Providers {
-		r.clients[name] = &http.Client{Timeout: p.Timeout}
+		st.clients[name] = &http.Client{Timeout: p.Timeout}
 	}
+	return st
+}
+
+// New builds a Router from the resolved configuration.
+func New(cfg *config.Config) *Router {
+	r := &Router{blackout: NewBlackout(cfg.Server.GlobalBlackout)}
+	r.state.Store(newRouterState(cfg))
 	return r
 }
 
 // Reload replaces routing configuration and rebuilds provider HTTP clients.
-// In-flight blackout state is preserved; learned Responses capabilities are not.
+// Blackout state is preserved. Learned Responses verdicts are not: base URLs
+// and supports_responses may have changed. Requests already in flight keep the
+// state they started with, so a verdict one of them learns lands in the old
+// state's cache and never reaches the new one.
 func (r *Router) Reload(cfg *config.Config) {
-	clients := make(map[string]*http.Client, len(cfg.Providers))
-	for name, p := range cfg.Providers {
-		clients[name] = &http.Client{Timeout: p.Timeout}
-	}
-	r.mu.Lock()
-	r.cfg = cfg
-	r.clients = clients
-	// Base URLs and supports_responses may have changed, so learned Responses
-	// verdicts no longer describe the current downstreams. Clear under the
-	// write lock so Execute (RLock) never observes the new config with a
-	// stale cache, and MarkChatOnly cannot race Clear after Unlock.
-	r.respCaps.Clear()
-	r.mu.Unlock()
+	r.state.Store(newRouterState(cfg))
 	r.blackout.SetDuration(cfg.Server.GlobalBlackout)
 }
 
@@ -101,24 +105,28 @@ const attemptIncompatible = "incompatible"
 
 // Resolve maps an inbound model name to an ordered list of targets (#12,#14,#15).
 func (r *Router) Resolve(model string) ([]config.Target, error) {
-	if route, ok := r.cfg.Models[model]; ok {
+	return r.state.Load().resolve(model)
+}
+
+func (st *routerState) resolve(model string) ([]config.Target, error) {
+	if route, ok := st.cfg.Models[model]; ok {
 		return orderedTargets(route.Targets, route.Selection), nil
 	}
 	// provider/model form.
 	if idx := strings.Index(model, "/"); idx > 0 && idx < len(model)-1 {
 		prov, rest := model[:idx], model[idx+1:]
-		if _, ok := r.cfg.Providers[prov]; ok {
+		if _, ok := st.cfg.Providers[prov]; ok {
 			return []config.Target{{Provider: prov, Model: rest}}, nil
 		}
 		// Unknown provider prefix: hand the FULL name to the fallback providers
 		// (e.g. "nvidia/nemotron-3" -> openrouter model "nvidia/nemotron-3").
-		if fb := r.fallbackTargets(model); len(fb) > 0 {
+		if fb := st.fallbackTargets(model); len(fb) > 0 {
 			return fb, nil
 		}
 		return nil, fmt.Errorf("unknown provider %q and no fallback_providers configured", prov)
 	}
 	// Bare, unmapped name routes to the fallback providers.
-	if fb := r.fallbackTargets(model); len(fb) > 0 {
+	if fb := st.fallbackTargets(model); len(fb) > 0 {
 		return fb, nil
 	}
 	return nil, fmt.Errorf("unrecognized model %q and no fallback_providers configured", model)
@@ -128,8 +136,8 @@ func (r *Router) Resolve(model string) ([]config.Target, error) {
 // model name, one target per configured fallback provider. The order follows
 // the configured fallback selection method: sequential (config order) by
 // default, or shuffled per request when set to shuffle/random.
-func (r *Router) fallbackTargets(model string) []config.Target {
-	provs := orderedProviders(r.cfg.FallbackProviders, r.cfg.FallbackSelection)
+func (st *routerState) fallbackTargets(model string) []config.Target {
+	provs := orderedProviders(st.cfg.FallbackProviders, st.cfg.FallbackSelection)
 	if len(provs) == 0 {
 		return nil
 	}
@@ -143,11 +151,10 @@ func (r *Router) fallbackTargets(model string) []config.Target {
 // Execute runs the full routing algorithm for one request and returns the
 // result along with a per-attempt log.
 func (r *Router) Execute(ctx context.Context, op provider.Operation, inboundModel string, body map[string]any) *Result {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	st := r.state.Load()
 
 	res := &Result{}
-	targets, err := r.Resolve(inboundModel)
+	targets, err := st.resolve(inboundModel)
 	if err != nil {
 		res.Status = http.StatusBadRequest
 		res.Body = errorBody(err.Error(), "invalid_request_error")
@@ -166,7 +173,7 @@ func (r *Router) Execute(ctx context.Context, op provider.Operation, inboundMode
 
 	// Phase 1: normal keys, randomized order, with blackout on failure.
 	for _, t := range targets {
-		p := r.cfg.Providers[t.Provider]
+		p := st.cfg.Providers[t.Provider]
 		if p == nil {
 			att := Attempt{
 				Provider: t.Provider, Model: t.Model, Outcome: "error",
@@ -186,7 +193,7 @@ func (r *Router) Execute(ctx context.Context, op provider.Operation, inboundMode
 				notifyAttempt(ctx, att)
 				continue
 			}
-			done, skip := r.tryKey(ctx, res, p, t.Model, op, body, key, "normal", &last)
+			done, skip := r.tryKey(ctx, st, res, p, t.Model, op, body, key, "normal", &last)
 			if done {
 				return res
 			}
@@ -200,7 +207,7 @@ func (r *Router) Execute(ctx context.Context, op provider.Operation, inboundMode
 	// Phase 2: fallback keys, in listed order, never blacked out, gated by
 	// fallback_models (#6,#8).
 	for _, t := range targets {
-		p := r.cfg.Providers[t.Provider]
+		p := st.cfg.Providers[t.Provider]
 		if p == nil || !p.FallbackAllows(t.Model) {
 			continue
 		}
@@ -208,7 +215,7 @@ func (r *Router) Execute(ctx context.Context, op provider.Operation, inboundMode
 			continue
 		}
 		for _, key := range p.FallbackKeySet() {
-			done, skip := r.tryKey(ctx, res, p, t.Model, op, body, key, "fallback", &last)
+			done, skip := r.tryKey(ctx, st, res, p, t.Model, op, body, key, "fallback", &last)
 			if done {
 				return res
 			}
@@ -249,8 +256,8 @@ func (r *Router) Execute(ctx context.Context, op provider.Operation, inboundMode
 // eligible again immediately. Retrying the same key would burn the key's
 // rate limit (RPM) without changing a deterministic-looking failure, so
 // the router moves on.
-func (r *Router) tryKey(ctx context.Context, res *Result, p *config.Provider, model string, op provider.Operation, body map[string]any, key, keyType string, last **provider.Response) (done, skip bool) {
-	resp, att, oc := r.callOnce(ctx, p, model, op, body, key, keyType)
+func (r *Router) tryKey(ctx context.Context, st *routerState, res *Result, p *config.Provider, model string, op provider.Operation, body map[string]any, key, keyType string, last **provider.Response) (done, skip bool) {
+	resp, att, oc := r.callOnce(ctx, st, p, model, op, body, key, keyType)
 	res.Attempts = append(res.Attempts, att)
 	notifyAttempt(ctx, att)
 	// Incompatible responses have HTTPStatus 0 and an empty body — they must
@@ -297,11 +304,11 @@ func (r *Router) tryKey(ctx context.Context, res *Result, p *config.Provider, mo
 	}
 }
 
-func (r *Router) callOnce(ctx context.Context, p *config.Provider, model string, op provider.Operation, body map[string]any, key, keyType string) (*provider.Response, Attempt, outcome) {
+func (r *Router) callOnce(ctx context.Context, st *routerState, p *config.Provider, model string, op provider.Operation, body map[string]any, key, keyType string) (*provider.Response, Attempt, outcome) {
 	att := Attempt{Provider: p.Name, Model: model, Key: maskKey(key), KeyType: keyType}
 	start := time.Now()
-	resp, err := provider.Call(ctx, r.clients[p.Name], p.Kind, p.BaseURL, key, provider.Request{
-		Op: op, Model: model, Body: body, ResponsesMode: r.responsesMode(p, op),
+	resp, err := provider.Call(ctx, st.clients[p.Name], p.Kind, p.BaseURL, key, provider.Request{
+		Op: op, Model: model, Body: body, ResponsesMode: st.responsesMode(p, op),
 	})
 	att.LatencyMS = time.Since(start).Milliseconds()
 	if resp != nil {
@@ -310,7 +317,7 @@ func (r *Router) callOnce(ctx context.Context, p *config.Provider, model string,
 		att.OutboundURL = resp.OutboundURL
 	}
 	if resp != nil && resp.LearnChatOnly {
-		r.respCaps.MarkChatOnly(p.Name)
+		st.respCaps.MarkChatOnly(p.Name)
 	}
 
 	// If the inbound request context is done, the caller disconnected or hit its
@@ -355,7 +362,7 @@ func (r *Router) callOnce(ctx context.Context, p *config.Provider, model string,
 	}
 
 	// HTTP succeeded: verify output (#5).
-	if r.outputOK(op, resp) {
+	if st.outputOK(op, resp) {
 		att.Outcome = "success"
 		return resp, att, outcomeSuccess
 	}
@@ -377,7 +384,7 @@ func (r *Router) callOnce(ctx context.Context, p *config.Provider, model string,
 
 // outputOK applies output verification: chat responses must have content and a
 // finish reason in the configured good set; embeddings must carry data (#5).
-func (r *Router) outputOK(op provider.Operation, resp *provider.Response) bool {
+func (st *routerState) outputOK(op provider.Operation, resp *provider.Response) bool {
 	if op == provider.OpEmbed {
 		return resp.HasContent
 	}
@@ -389,12 +396,12 @@ func (r *Router) outputOK(op provider.Operation, resp *provider.Response) bool {
 		// chat reply that failed to wrap) carries no finish reason to verify.
 		return false
 	}
-	return r.cfg.Server.GoodFinishReasons[strings.ToLower(resp.FinishReason)]
+	return st.cfg.Server.GoodFinishReasons[strings.ToLower(resp.FinishReason)]
 }
 
 // responsesMode decides how an OpResponses request should reach the provider:
 // explicit config wins, then the probe cache, otherwise probe and learn.
-func (r *Router) responsesMode(p *config.Provider, op provider.Operation) provider.ResponsesMode {
+func (st *routerState) responsesMode(p *config.Provider, op provider.Operation) provider.ResponsesMode {
 	if op != provider.OpResponses {
 		return provider.ResponsesModeProbe
 	}
@@ -404,7 +411,7 @@ func (r *Router) responsesMode(p *config.Provider, op provider.Operation) provid
 		}
 		return provider.ResponsesModeChatOnly
 	}
-	if r.respCaps.IsChatOnly(p.Name) {
+	if st.respCaps.IsChatOnly(p.Name) {
 		return provider.ResponsesModeChatOnly
 	}
 	return provider.ResponsesModeProbe

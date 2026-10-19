@@ -7,8 +7,8 @@ import "sync"
 // paying for a doomed probe on every call. It only holds negative results:
 // a provider that answered on /responses is simply never recorded.
 //
-// The cache is discarded on config reload, so a downstream that gained the
-// route (or a corrected base_url) is probed again.
+// Each config reload starts a new cache (see routerState), so a downstream that
+// gained the route (or a corrected base_url) is probed again.
 type responsesCapability struct {
 	mu       sync.Mutex
 	chatOnly map[string]bool
@@ -30,10 +30,4 @@ func (c *responsesCapability) MarkChatOnly(provider string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.chatOnly[provider] = true
-}
-
-func (c *responsesCapability) Clear() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.chatOnly = make(map[string]bool)
 }
