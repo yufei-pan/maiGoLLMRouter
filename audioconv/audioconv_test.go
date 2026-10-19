@@ -169,3 +169,16 @@ func TestConvertAcceptsAudioContainers(t *testing.T) {
 		}
 	}
 }
+
+// TestConvertClampsPCMRate verifies a raw PCM rate from outside (a client's
+// format string) can't stretch a little input into hours of output.
+func TestConvertClampsPCMRate(t *testing.T) {
+	ffmpeg := needFFmpeg(t)
+	out, _, err := Convert(context.Background(), ffmpeg, make([]byte, 200), "audio/pcm;rate=1", "pcm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) > 10_000 {
+		t.Errorf("100 samples became %d bytes: the rate was not clamped", len(out))
+	}
+}

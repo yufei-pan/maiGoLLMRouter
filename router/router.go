@@ -333,7 +333,7 @@ func (r *Router) settle(ctx context.Context, res *Result, p *config.Provider, mo
 		// Transport/HTTP errors black out the normal key and move on.
 		// HTTP 400 is a client/request error, not a key/model/provider fault,
 		// so it must not black out anything.
-		if keyType == "normal" && !isHTTP400(resp) {
+		if keyType == "normal" && !isHTTP400(resp) && (resp == nil || !resp.NoBlackout) {
 			r.blackout.Fail(key, model)
 		}
 		return false, false

@@ -68,6 +68,7 @@ type Response struct {
 	LearnChatOnly bool   // a probe found that the downstream has no /responses route
 	Incompatible  bool   // this request cannot be served over this provider's dialect
 	ContentType   string // speech: the audio's type, as the provider sent it
+	NoBlackout    bool   // the failure says nothing about the key's health
 }
 
 // OK reports whether the HTTP call itself succeeded (2xx). It does not assess

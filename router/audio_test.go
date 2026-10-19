@@ -146,8 +146,8 @@ targets = ["stepfun/asr", "google/g-flash"]
 	if !res.Success || string(res.Body) != `{"text":"hello"}` {
 		t.Fatalf("result = %+v (%s)", res, res.Body)
 	}
-	if !r.blackout.Blocked("ks", "asr") {
-		t.Error("a provider error event should black out the stepfun key")
+	if r.blackout.Blocked("ks", "asr") {
+		t.Error("an error event that says nothing about the key must not black it out")
 	}
 }
 

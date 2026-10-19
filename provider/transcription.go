@@ -100,6 +100,12 @@ func openAITranscription(ctx context.Context, client *http.Client, baseURL, apiK
 func stepfunTranscription(ctx context.Context, client *http.Client, baseURL, apiKey string, req Request) (*Response, error) {
 	tr := req.Transcription
 	audio, format := tr.Audio, strings.ToLower(tr.Format)
+	if !knownAudioFormat(format) {
+		// Only plain, known names reach ffmpeg: a client's format string must
+		// not carry parameters (such as a PCM rate) into the conversion.
+		body := upstreamErrorBody("unknown audio format")
+		return &Response{HTTPStatus: http.StatusBadRequest, OpenAIBody: body, RawResponse: body}, nil
+	}
 	if !slices.Contains(stepfunFormats, format) {
 		converted, _, err := audioconv.Convert(ctx, req.FFmpeg, audio, "audio/"+format, "opus")
 		if err != nil {
@@ -148,11 +154,18 @@ func stepfunTranscription(ctx context.Context, client *http.Client, baseURL, api
 			resp.OpenAIBody, resp.HasContent = mustJSON(map[string]any{"text": m.Text}), true
 			return resp, nil
 		case "error":
-			// A stream that answered 200 still failed: report it as the HTTP
-			// status it stands for, 400 when the request itself was at fault.
-			resp.HTTPStatus = http.StatusBadGateway
-			if stepfunRequestFault(fmt.Sprint(m.Code), m.Message) {
-				resp.HTTPStatus = http.StatusBadRequest
+			// A stream that answered 200 still failed. It blacks out the key
+			// only when it says something about the key (auth, quota, rate):
+			// otherwise a client could get keys blacked out with crafted audio.
+			// Its status is 400 when the request itself was at fault.
+			code := fmt.Sprint(m.Code)
+			switch {
+			case stepfunKeyFault(code, m.Message):
+				resp.HTTPStatus = http.StatusBadGateway
+			case stepfunRequestFault(code, m.Message):
+				resp.HTTPStatus, resp.NoBlackout = http.StatusBadRequest, true
+			default:
+				resp.HTTPStatus, resp.NoBlackout = http.StatusBadGateway, true
 			}
 			resp.OpenAIBody = mustJSON(map[string]any{"error": map[string]any{"message": m.Message, "code": m.Code}})
 			return resp, nil
@@ -161,6 +174,24 @@ func stepfunTranscription(ctx context.Context, client *http.Client, baseURL, api
 	resp.HTTPStatus = http.StatusBadGateway
 	resp.OpenAIBody = upstreamErrorBody("the provider's transcription ended without a result")
 	return resp, nil
+}
+
+// stepfunKeyFault reports an error event about the key itself: its auth, quota
+// or rate limit, the only kind that says the key should rest.
+func stepfunKeyFault(code, message string) bool {
+	s := strings.ToLower(code + " " + message)
+	for _, w := range []string{"auth", "api key", "apikey", "permission", "forbidden", "quota", "balance", "insufficient", "rate limit", "too many requests"} {
+		if strings.Contains(s, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// knownAudioFormat reports a plain audio format name the router knows.
+func knownAudioFormat(format string) bool {
+	_, ok := geminiAudioMIMEs[format]
+	return ok || format == "pcm"
 }
 
 // stepfunRequestFault reports an error event caused by the request itself (the

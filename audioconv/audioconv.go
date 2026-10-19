@@ -19,6 +19,16 @@ import (
 // little-endian, as OpenAI, OpenRouter and Gemini produce it.
 const DefaultPCMRate = 24000
 
+// Limits on one conversion. The input may come from a client, so a stated PCM
+// rate is clamped (a tiny rate would stretch a little input into hours of
+// audio), and ffmpeg's output and run time are capped.
+const (
+	minPCMRate     = 8000
+	maxPCMRate     = 48000
+	maxOutputBytes = 64 << 20
+	maxRunTime     = 60 * time.Second
+)
+
 type encoding struct {
 	args        []string
 	contentType string
@@ -121,16 +131,23 @@ func Convert(ctx context.Context, ffmpeg string, data []byte, contentType, forma
 	args := []string{"-hide_banner", "-loglevel", "error",
 		"-protocol_whitelist", "pipe", "-format_whitelist", inputFormats}
 	if IsRawPCM(contentType) {
-		args = append(args, "-f", "s16le", "-ar", strconv.Itoa(PCMRate(contentType)), "-ac", "1")
+		rate := min(max(PCMRate(contentType), minPCMRate), maxPCMRate)
+		args = append(args, "-f", "s16le", "-ar", strconv.Itoa(rate), "-ac", "1")
 	}
 	args = append(args, "-i", "pipe:0")
 	args = append(args, enc.args...)
 	args = append(args, "pipe:1")
 
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, maxRunTime)
+		defer cancel()
+	}
 	cmd := exec.CommandContext(ctx, ffmpeg, args...)
 	cmd.Stdin = bytes.NewReader(data)
-	var out, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &stderr
+	var stderr bytes.Buffer
+	out := &cappedBuffer{max: maxOutputBytes}
+	cmd.Stdout, cmd.Stderr = out, &stderr
 	cmd.WaitDelay = time.Second
 	if err := cmd.Run(); err != nil {
 		if msg := strings.TrimSpace(stderr.String()); msg != "" {
@@ -142,4 +159,18 @@ func Convert(ctx context.Context, ffmpeg string, data []byte, contentType, forma
 		return nil, "", errors.New("ffmpeg produced no audio")
 	}
 	return out.Bytes(), enc.contentType, nil
+}
+
+// cappedBuffer collects ffmpeg's output and refuses more than max bytes, which
+// stops ffmpeg (its writes fail) and fails the conversion.
+type cappedBuffer struct {
+	bytes.Buffer
+	max int
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if b.Len()+len(p) > b.max {
+		return 0, errors.New("ffmpeg output over the size limit")
+	}
+	return b.Buffer.Write(p)
 }

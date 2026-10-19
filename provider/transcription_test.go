@@ -192,3 +192,34 @@ func TestEmptyTranscriptHasContent(t *testing.T) {
 		t.Errorf("an empty transcript is a transcript: %+v", resp)
 	}
 }
+
+// TestStepfunTranscriptionRejectsOddFormats verifies only plain, known format
+// names reach ffmpeg: anything else is refused as the request's fault.
+func TestStepfunTranscriptionRejectsOddFormats(t *testing.T) {
+	srv := stepfunASR(t, nil)
+	req := transcribeReq("stepaudio-2.5-asr", "stepfun", TranscriptionRequest{Audio: make([]byte, 200), Format: "pcm;rate=1"})
+	req.FFmpeg = "/nonexistent/ffmpeg-must-not-run"
+	resp, _ := Call(context.Background(), srv.Client(), "openai", srv.URL, "k", req)
+	if resp.HTTPStatus != 400 || resp.HasContent {
+		t.Errorf("odd format: status %d", resp.HTTPStatus)
+	}
+}
+
+// TestStepfunErrorEventsBlackOutOnlyForKeyFaults verifies an error event on a
+// stream that answered 200 blacks out the key only when it is about the key.
+func TestStepfunErrorEventsBlackOutOnlyForKeyFaults(t *testing.T) {
+	for msg, noBlackout := range map[string]bool{
+		"internal error":       true,
+		"invalid audio format": true,
+		"quota exceeded":       false,
+		"invalid api key":      false,
+		"rate limit exceeded":  false,
+	} {
+		srv := stepfunASR(t, nil, `{"type":"error","message":"`+msg+`"}`)
+		resp, _ := Call(context.Background(), srv.Client(), "openai", srv.URL, "k",
+			transcribeReq("stepaudio-2.5-asr", "stepfun", TranscriptionRequest{Audio: []byte("RIFF"), Format: "wav"}))
+		if resp.NoBlackout != noBlackout || resp.OK() {
+			t.Errorf("%q: NoBlackout %v (want %v), status %d", msg, resp.NoBlackout, noBlackout, resp.HTTPStatus)
+		}
+	}
+}
