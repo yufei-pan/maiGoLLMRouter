@@ -112,6 +112,10 @@ func CallStream(ctx context.Context, client *http.Client, kind, baseURL, apiKey 
 		stream, resp, err = openAIChatStream(ctx, client, baseURL, apiKey, timeout, req, WantsUsage(req.Body))
 	case kind == "openai" && req.Op == OpResponses:
 		stream, resp, err = openAIResponsesStream(ctx, client, baseURL, apiKey, timeout, req)
+	case kind == "gemini" && req.Op == OpChat:
+		stream, resp, err = geminiChatStream(ctx, client, baseURL, apiKey, timeout, req, WantsUsage(req.Body))
+	case kind == "gemini" && req.Op == OpResponses:
+		stream, resp, err = geminiResponsesStream(ctx, client, baseURL, apiKey, timeout, req)
 	default:
 		if timeout > 0 {
 			var cancel context.CancelFunc
@@ -125,6 +129,28 @@ func CallStream(ctx context.Context, client *http.Client, kind, baseURL, apiKey 
 		resp.Prohibited = true
 	}
 	return stream, resp, err
+}
+
+// geminiResponsesStream serves a portable Responses request over Gemini's
+// chat stream, re-emitted as Responses events.
+func geminiResponsesStream(ctx context.Context, client *http.Client, baseURL, apiKey string, timeout time.Duration, req Request) (*Stream, *Response, error) {
+	if err := PortableForChat(req.Body); err != nil {
+		return nil, &Response{Incompatible: true}, nil
+	}
+	chatBody, err := ResponsesToChat(req.Body, req.Model)
+	if err != nil {
+		return nil, &Response{Incompatible: true}, nil
+	}
+	chatReq := req
+	chatReq.Op, chatReq.Body = OpChat, chatBody
+	s, resp, err := geminiChatStream(ctx, client, baseURL, apiKey, timeout, chatReq, true)
+	if s != nil {
+		return chatToResponses(s, req.Model), nil, nil
+	}
+	if resp != nil && err == nil && resp.OK() {
+		wrapChatReplyAsResponses(resp, req.Model)
+	}
+	return nil, resp, err
 }
 
 // callResponsesViaChat serves OpResponses for non-OpenAI dialects by translating
