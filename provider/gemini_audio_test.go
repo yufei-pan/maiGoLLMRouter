@@ -67,3 +67,20 @@ func TestGeminiStreamCarriesInputAudio(t *testing.T) {
 		t.Errorf("streamed request has no audio: %s", sent)
 	}
 }
+
+func TestNormalizeAudioFormat(t *testing.T) {
+	for in, want := range map[string]string{
+		"wav": "wav", ".WAV": "wav", "audio/x-wav": "wav", "audio/mpeg": "mp3", "mpga": "mp3",
+		"audio/ogg; codecs=opus": "ogg", "opus": "ogg", "audio/webm": "webm", "m4a": "m4a",
+		"audio/mp4": "mp4", "audio/L16;rate=24000": "pcm", "pcm;rate=1": "pcm",
+	} {
+		if got, ok := NormalizeAudioFormat(in); !ok || got != want {
+			t.Errorf("NormalizeAudioFormat(%q) = %q, %v; want %q", in, got, ok, want)
+		}
+	}
+	for _, in := range []string{"", "application/octet-stream", ".bin", "ogg rm -rf"} {
+		if got, ok := NormalizeAudioFormat(in); ok {
+			t.Errorf("NormalizeAudioFormat(%q) = %q, want unknown", in, got)
+		}
+	}
+}

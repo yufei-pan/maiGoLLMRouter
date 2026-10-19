@@ -75,7 +75,9 @@ func (r *Router) executeAudio(ctx context.Context, st *routerState, op provider.
 	case onlyIncompatible(res.Attempts):
 		res.Status = http.StatusBadRequest
 		res.Body = errorBody("no configured target for this model can serve audio", "invalid_request_error")
-	case last != nil && len(last.OpenAIBody) > 0:
+	// A last reply that was a 2xx without audio or text (e.g. a text reply to
+	// a speech request) is never passed on: it falls to the 502 below.
+	case last != nil && len(last.OpenAIBody) > 0 && exhaustedHTTPStatus(last) >= 300:
 		res.Status = exhaustedHTTPStatus(last)
 		res.Body = last.OpenAIBody
 	default:

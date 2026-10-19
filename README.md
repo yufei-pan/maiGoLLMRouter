@@ -20,6 +20,7 @@ Minimal dependencies: the Go standard library plus one TOML parser
 - **Output verification + retry**: chat responses must have content and a "good" finish reason; otherwise the request is retried (bounded, no blackout).
 - **Streaming** (`"stream": true` on chat and Responses): text, reasoning and tool-call arguments go to the client as the provider writes them. Until the first output the router fails over between keys and targets as usual; from then on it is committed to that attempt, and a later failure arrives as an error event inside the stream. OpenAI-kind providers stream through; Gemini is translated; Anthropic replies are sent as a stream once complete.
 - **Chat, embeddings, and Responses** support.
+- **Audio**: `POST /v1/audio/speech` and `POST /v1/audio/transcriptions` through OpenAI-kind providers (passed through), stepfun (its own transcription route) and Gemini (translated), with the usual routing and failover. Speech comes back in the format the client asks for (`opus`, `mp3`, `aac`, `flac`, `wav`, `pcm`), converted with `ffmpeg`. Gemini chat models take `input_audio`.
 - **Model mapping**: inbound model name → ordered list of `provider/model` targets.
 - **Fallback providers**: a list of catch-all providers for unmapped names, tried in sequence (or shuffled).
 - **Pass-through** of unknown request arguments to the downstream provider.
@@ -123,6 +124,50 @@ Gemini receives as `inlineData`/`fileData` and Anthropic as `document` blocks
 the title; image files become `image` blocks). Chat Completions requests with
 `file` parts get the same mapping.
 
+### Audio
+
+Speech (`POST /v1/audio/speech`) takes OpenAI's JSON (`model`, `input`, `voice`,
+`response_format`, `instructions`, `speed`) and answers with audio in
+`response_format` (default `mp3`): `opus` (Ogg, 32 kbps mono, `audio/ogg`),
+`mp3`, `aac`, `flac`, `wav` or `pcm` (24 kHz mono 16-bit). OpenAI-kind providers
+are asked for `pcm` and the router converts it with `ffmpeg`; Gemini answers
+with WAV, converted the same way. Safari plays Ogg Opus from 18.4 on; older
+iPhones should ask for `mp3` or `aac`.
+
+```bash
+curl http://localhost:8470/v1/audio/speech \
+  -H "Authorization: Bearer sk-local-change-me" -H "Content-Type: application/json" \
+  -d '{"model":"shiori-voice","input":"Hello from Kyoto.","response_format":"opus"}' -o hello.ogg
+```
+
+Voices differ by provider, so a speech route can name one per target, and
+the format to ask an OpenAI-kind provider for (default `pcm`):
+
+```toml
+[model."shiori-voice"]
+targets = ["google/gemini-3.8-flash-lite-tts", "stepfun/stepaudio-2.5-tts"]
+
+[model."shiori-voice".speech."google/gemini-3.8-flash-lite-tts"]
+voice = "Kore"
+
+[model."shiori-voice".speech."stepfun/stepaudio-2.5-tts"]
+voice = "zixinnansheng"
+```
+
+A target's configured voice wins over the client's; on Gemini, a voice that
+isn't one of its 30 prebuilt names becomes `Kore`.
+
+Transcription (`POST /v1/audio/transcriptions`) takes OpenAI's multipart upload
+(`file`, `model`, `language`, `prompt`, `response_format`, `temperature`) or
+OpenRouter's JSON (`input_audio: {data, format}`), and answers `{"text": …}`
+(or plain text for `response_format=text`). Gemini, which has no transcription
+endpoint, is asked to transcribe the audio exactly; stepfun is reached on its
+SSE route; audio stepfun can't read (e.g. WebM) is converted to Ogg Opus
+first. An empty transcript (silence) is a success.
+
+Logs record audio as its size and type, never its bytes; chat and Responses
+requests carrying `input_audio` are logged the same way.
+
 ## Configuration
 
 See `[config.example.toml](config.example.toml)` for a fully commented example.
@@ -142,6 +187,8 @@ See `[config.example.toml](config.example.toml)` for a fully commented example.
 | `log_retention_days`  | Days to keep detail logs (default 60). `0` disables cleanup. Requires restart to change at runtime.        |
 | `cors`                | Let web apps in a browser (such as annai) call the API: `/v1/...` and `/healthz`, never the web UI. Default `true`; `false` turns it off. The API asks for a client key and uses no cookies, so this gives a page nothing it couldn't do with the key. |
 | `cors_origins`        | Limit `cors` to these exact origins, e.g. `["https://annai.guide"]`. Empty (the default) allows any origin. |
+| `ffmpeg`              | Path to `ffmpeg`, used to convert speech to the format a client asks for (e.g. Opus). Default `ffmpeg` on `PATH`. Without it, speech is sent as the provider made it, under its true type (raw PCM wrapped as WAV). |
+| `audio_timeout`       | Time limit for each speech or transcription attempt: the shorter of this and the provider's `timeout` (default `10s`), so a hung provider is failed over before a voice app gives up. |
 | `streaming`           | Send a request that asks for a stream piece by piece as the provider writes it. Default `true`; `false` still answers it as a stream, but only once the reply is complete (and checked, with retries, as a non-streamed one). |
 
 
@@ -157,6 +204,7 @@ See `[config.example.toml](config.example.toml)` for a fully commented example.
 | `keys`            | Normal keys (random selection, blacked out on failure).                                                                                                                                                                                                                                           |
 | `fallback_keys`   | Fallback keys (tried in order, never blacked out). If omitted but `fallback_models` is set, the normal `keys` are reused for the fallback round.                                                                                                                                                  |
 | `fallback_models` | Models allowed on the fallback round (empty = all).                                                                                                                                                                                                                                               |
+| `audio`           | Optional, for `kind = "openai"`: `"stepfun"` when the provider speaks stepfun's audio API (speech as OpenAI's, but transcription on `/audio/asr/sse`). Default `"openai"`. |
 | `supports_responses` | Optional. `true` = always `POST /responses`; `false` = never probe, Chat-translate portable Responses inbound; omit = probe `/responses` once and cache Chat-only until config reload. Applies to OpenAI-kind providers; Anthropic/Gemini always use Chat translation for portable Responses. |
 
 
@@ -301,4 +349,6 @@ Practical implications:
 - For translated dialects, pass-through of unknown arguments is best-effort. For Gemini, known top-level request fields (`toolConfig`, `safetySettings`, `systemInstruction`, `cachedContent`, `labels`, in camelCase or snake_case) are placed at the request root and an explicit `generationConfig` is merged in; all other extras go into `generationConfig`. For Anthropic, extras are merged top-level. OpenAI is pass-through (a non-streamed request has its streaming controls removed).
 - **Gemini tool calling** is translated from the OpenAI shape: `tools` (`{type:"function", function:{...}}`) and the legacy `functions` array become Gemini `functionDeclarations` (the parameter JSON Schema is sanitized to the fields Gemini accepts, dropping e.g. `additionalProperties`/`$schema`), `tool_choice` becomes `toolConfig.functionCallingConfig`, assistant `tool_calls` and `tool` result messages become `functionCall`/`functionResponse` parts, and Gemini `functionCall` responses are converted back into OpenAI `tool_calls` (with `finish_reason: "tool_calls"`). Tools already in Gemini-native form (`{functionDeclarations:[...]}`) are passed through unchanged.
 - **Gemini thought signatures**: Gemini 3 refuses a turn whose earlier tool call comes back without its thought signature. The router puts the signature on the tool call (`thought_signature`) and also remembers it by tool-call id (up to 4096, for 24 hours, until restart), so a client that drops the field still works; a remembered signature goes back only to the provider/model that wrote it. When none is known, the first call of a `gemini-*` turn gets Google's placeholder `skip_thought_signature_validator`, which Gemini accepts at some cost to reasoning. Through OpenAI-kind endpoints (OpenRouter, Google's OpenAI-style endpoint) the signatures travel in `reasoning_details` / `extra_content`, which the client must keep and send back; the router passes them through.
+- **Gemini `input_audio`**: chat parts `{"type":"input_audio","input_audio":{"data","format"}}` (or a `data:` URI) reach Gemini as inline audio (`wav`, `mp3`, `ogg`, `webm`, `flac`, `aac`, `m4a`/`mp4`, `aiff`). OpenAI-kind providers get them unchanged. Anthropic targets are skipped for speech and transcription.
+- **stepfun's Step Plan** includes `stepaudio-2.5-tts` and `stepaudio-2.5-asr` but no audio-input chat model, so chat with `input_audio` should go to Gemini or OpenRouter.
 - `max_tokens` is required by Anthropic; if omitted it defaults to 8192.

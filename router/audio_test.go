@@ -190,3 +190,18 @@ targets = ["claude/claude-x"]
 		t.Fatalf("result = %+v", res)
 	}
 }
+
+// TestAudioExhaustedNeverReturns2xx verifies a run whose last reply was a 2xx
+// without audio (a text reply) gives up with a real error status.
+func TestAudioExhaustedNeverReturns2xx(t *testing.T) {
+	r := audioProviders{google: func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"candidates":[{"content":{"parts":[{"text":"I can't say that"}]}}]}`)
+	}}.config(t, "", `
+[model."shiori"]
+targets = ["google/g-tts"]
+`)
+	res := r.ExecuteSpeech(context.Background(), "shiori", provider.SpeechRequest{Input: "Hi"})
+	if res.Success || res.Status != http.StatusBadGateway {
+		t.Fatalf("status %d, success %v", res.Status, res.Success)
+	}
+}

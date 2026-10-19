@@ -55,6 +55,8 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/chat/completions", s.handle(provider.OpChat))
 	mux.HandleFunc("/v1/embeddings", s.handle(provider.OpEmbed))
 	mux.HandleFunc("/v1/responses", s.handle(provider.OpResponses))
+	mux.HandleFunc("/v1/audio/speech", s.handleSpeech)
+	mux.HandleFunc("/v1/audio/transcriptions", s.handleTranscription)
 	mux.HandleFunc("/v1/models", s.handleModels)
 	mux.HandleFunc("/v1/models/", s.handleModel)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
