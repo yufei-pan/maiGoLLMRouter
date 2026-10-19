@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -21,6 +22,20 @@ type StreamSink interface {
 // emptyStreamBody answers a streamed request whose last attempt ended without
 // any output.
 var emptyStreamBody = errorBody("the provider's stream ended without output", "upstream_error")
+
+// connectionFailed is what the client is told about a transport failure.
+const connectionFailed = "the connection to the provider failed"
+
+// errorMessage is the message of an {"error": {...}} body, or "".
+func errorMessage(body []byte) string {
+	var parsed struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(body, &parsed)
+	return parsed.Error.Message
+}
 
 // ExecuteStream routes a request that asked for a stream. Until the first
 // output arrives it routes exactly as Execute does: keys, blackout, fallback.
@@ -167,7 +182,7 @@ func (r *Router) judgeEarlyEnd(ctx context.Context, stream *provider.Stream, s p
 		att.Outcome, att.Error = "bad_output", "the provider's stream ended without output"
 		return failed, att, outcomeBadOutput
 	default:
-		failed.HTTPStatus, failed.OpenAIBody = http.StatusBadGateway, errorBody(err.Error(), "upstream_error")
+		failed.HTTPStatus, failed.OpenAIBody = http.StatusBadGateway, errorBody(connectionFailed, "upstream_error")
 		att.Outcome, att.Error = "provider_error", err.Error()
 		return failed, att, outcomeProviderError
 	}
@@ -224,20 +239,22 @@ func (r *Router) pump(ctx context.Context, st *routerState, res *Result, p *conf
 	default:
 		// The stream failed after the client had output: tell the client in
 		// the stream itself, since the status line is long gone.
-		status, msg := http.StatusBadGateway, end.Error()
+		// The client sees the provider's own message or fixed words, never a
+		// transport error, which names the provider's address; the log keeps it.
+		status, clientMsg := http.StatusBadGateway, connectionFailed
 		frame := (*provider.Frame)(nil)
 		if errors.As(end, &se) {
-			status, msg, frame = se.Status, se.Error(), se.Frame
-			if se.Err != nil {
-				msg = se.Err.Error()
+			status, frame = se.Status, se.Frame
+			if m := errorMessage(se.Body); m != "" {
+				clientMsg = m
 			}
 		}
 		if frame == nil {
-			f := stream.ErrorFrame(status, msg)
+			f := stream.ErrorFrame(status, clientMsg)
 			frame = &f
 		}
 		_ = sink.Write(*frame)
-		att.HTTPStatus, att.Error, att.Response = status, msg, string(s.Raw)
+		att.HTTPStatus, att.Error, att.Response = status, end.Error(), string(s.Raw)
 		if (se != nil && se.Prohibited) || s.Prohibited {
 			att.Outcome = "prohibited_content"
 		} else {

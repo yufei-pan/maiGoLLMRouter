@@ -384,3 +384,34 @@ targets = ["openai/real-model"]
 		t.Errorf("first attempt = %+v, want provider_error 504", a)
 	}
 }
+
+// TestStreamErrorsDoNotLeakProviderAddress verifies a transport failure's
+// details (which name the provider's URL) stay in the attempt log: the client
+// gets a fixed message, before and after commit.
+func TestStreamErrorsDoNotLeakProviderAddress(t *testing.T) {
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close() // nothing listens there any more: every call fails to connect
+	res := streamCfg(t, deadURL, "").ExecuteStream(context.Background(), provider.OpChat, "m", streamReq(), &recordingSink{})
+	host := strings.TrimPrefix(deadURL, "http://")
+	if res.Committed || strings.Contains(string(res.Body), host) {
+		t.Errorf("exhaustion body leaks the provider address: %s", res.Body)
+	}
+	if !strings.Contains(res.Attempts[0].Error, host) {
+		t.Errorf("the attempt log should keep the detail, got %q", res.Attempts[0].Error)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, sRole, sContent)
+		if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+			conn.Close()
+		}
+	}))
+	defer srv.Close()
+	sink := &recordingSink{}
+	streamCfg(t, srv.URL, "").ExecuteStream(context.Background(), provider.OpChat, "m", streamReq(), sink)
+	got := sink.data()
+	if last := got[len(got)-1]; strings.Contains(last, strings.TrimPrefix(srv.URL, "http://")) {
+		t.Errorf("error frame leaks the provider address: %s", last)
+	}
+}

@@ -128,7 +128,9 @@ func (c *streamConn) readAll() ([]byte, error) {
 
 // failure turns a transport error into what the stream reports: the inbound
 // context's own error when the caller went away, a 504 *StreamError when the
-// timer ran out, else a 502 *StreamError for a dropped connection.
+// timer ran out, else a 502 *StreamError for a dropped connection. The body,
+// which may reach the client, never carries the transport error: it names the
+// provider's address. Err keeps it for the log.
 func (c *streamConn) failure(err error) error {
 	if c.parent.Err() != nil {
 		return c.parent.Err()
@@ -138,7 +140,7 @@ func (c *streamConn) failure(err error) error {
 	}
 	return &StreamError{
 		Status: 502,
-		Body:   upstreamErrorBody("the connection to the provider dropped: " + err.Error()),
+		Body:   upstreamErrorBody("the connection to the provider dropped"),
 		Err:    err,
 	}
 }

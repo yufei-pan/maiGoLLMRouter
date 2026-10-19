@@ -421,7 +421,7 @@ func (s *chatToResponsesSource) translateError(err error) error {
 	_ = json.Unmarshal(se.Body, &body)
 	msg := body.Error.Message
 	if msg == "" {
-		msg = se.Error()
+		msg = "the provider reported an error"
 	}
 	code, ok := body.Error.Code.(string)
 	if !ok || code == "" {
