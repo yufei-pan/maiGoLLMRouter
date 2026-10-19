@@ -19,6 +19,7 @@ type responsesEmitter struct {
 	items   []*emittedItem // in output_index order
 	current *emittedItem   // the open message or reasoning item, if any
 	calls   map[int]*emittedItem
+	nextID  string // when set, the id the next opened item takes (a buffered reply keeps its own)
 }
 
 type emittedItem struct {
@@ -70,7 +71,12 @@ func (e *responsesEmitter) start() []Frame {
 }
 
 func (e *responsesEmitter) open(kind, prefix string) *emittedItem {
-	it := &emittedItem{kind: kind, id: prefix + randomID(), index: len(e.items)}
+	id := e.nextID
+	if id == "" {
+		id = prefix + randomID()
+	}
+	e.nextID = ""
+	it := &emittedItem{kind: kind, id: id, index: len(e.items)}
 	e.items = append(e.items, it)
 	return it
 }
@@ -164,6 +170,21 @@ func (e *responsesEmitter) toolCall(index int, callID, name, argsDelta, signatur
 		}))
 	}
 	return out
+}
+
+// item sends an output item the emitter does not build itself (a provider's
+// own tool call, such as a web search), added and done at once.
+func (e *responsesEmitter) item(raw map[string]any) []Frame {
+	out := e.closeAll()
+	typ, _ := raw["type"].(string)
+	it := e.open(typ, "item_")
+	it.closed = true
+	if _, ok := raw["id"]; !ok {
+		raw["id"] = it.id
+	}
+	return append(out,
+		e.event("response.output_item.added", map[string]any{"output_index": it.index, "item": raw}),
+		e.event("response.output_item.done", map[string]any{"output_index": it.index, "item": raw}))
 }
 
 func (e *responsesEmitter) closeItem(it *emittedItem) []Frame {
