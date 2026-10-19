@@ -88,7 +88,7 @@ func main() {
 
 	httpServer := &http.Server{
 		Addr:              cfg.Server.Listen,
-		Handler:           mux,
+		Handler:           srv.WithCORS(mux),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

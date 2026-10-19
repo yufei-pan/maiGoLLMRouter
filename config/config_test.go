@@ -349,3 +349,37 @@ coerce_trailing_assistant = true
 		t.Fatal("explicit true not respected")
 	}
 }
+
+func TestCORSOnByDefaultAndCanBeTurnedOff(t *testing.T) {
+	path := writeTemp(t, `
+[server]
+client_keys = ["k"]
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.Server.CORS {
+		t.Error("CORS should be on when the config doesn't mention it")
+	}
+	if len(cfg.Server.CORSOrigins) != 0 {
+		t.Errorf("no origins listed means any origin: %+v", cfg.Server.CORSOrigins)
+	}
+
+	path = writeTemp(t, `
+[server]
+client_keys = ["k"]
+cors = false
+cors_origins = ["https://annai.guide"]
+`)
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Server.CORS {
+		t.Error("cors = false turns it off")
+	}
+	if len(cfg.Server.CORSOrigins) != 1 || cfg.Server.CORSOrigins[0] != "https://annai.guide" {
+		t.Errorf("cors_origins: %+v", cfg.Server.CORSOrigins)
+	}
+}

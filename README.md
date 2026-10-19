@@ -131,6 +131,8 @@ See `[config.example.toml](config.example.toml)` for a fully commented example.
 | `good_finish_reasons` | Normalized finish reasons treated as success.                                                              |
 | `config_reload_interval` | Poll interval for automatic config reload (default `3s`). Set to `0` to disable polling; `SIGHUP` / `systemctl reload` still reloads. |
 | `log_retention_days`  | Days to keep detail logs (default 60). `0` disables cleanup. Requires restart to change at runtime.        |
+| `cors`                | Let web apps in a browser (such as annai) call the API: `/v1/...` and `/healthz`, never the web UI. Default `true`; `false` turns it off. The API asks for a client key and uses no cookies, so this gives a page nothing it couldn't do with the key. |
+| `cors_origins`        | Limit `cors` to these exact origins, e.g. `["https://annai.guide"]`. Empty (the default) allows any origin. |
 
 
 ### Providers (`[[provider]]`, repeatable)

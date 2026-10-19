@@ -164,3 +164,91 @@ targets = ["openai/gpt-4o"]
 		t.Fatalf("outbound last=%#v", last)
 	}
 }
+
+// corsServer is the router's handler as main.go wires it, with the API and a stand-in web UI route.
+func corsServer(t *testing.T, server string) http.Handler {
+	t.Helper()
+	cfg := loadCfg(t, "[server]\nclient_keys = [\"sk-test\"]\n"+server+`
+[[provider]]
+name = "openai"
+kind = "openai"
+base_url = "http://127.0.0.1:1"
+keys = ["sk-upstream"]
+
+[model."m"]
+targets = ["openai/real-model"]
+`)
+	srv := New(cfg, router.New(cfg), nil, nil)
+	mux := http.NewServeMux()
+	srv.Register(mux)
+	mux.HandleFunc("/ui/logs", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "[]") })
+	return srv.WithCORS(mux)
+}
+
+func preflight(h http.Handler, path, origin string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodOptions, path, nil)
+	req.Header.Set("Origin", origin)
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	req.Header.Set("Access-Control-Request-Headers", "authorization, content-type")
+	req.Header.Set("Access-Control-Request-Private-Network", "true")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestCORSOnByDefaultForTheAPI(t *testing.T) {
+	h := corsServer(t, "")
+	rec := preflight(h, "/v1/chat/completions", "https://annai.guide")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("preflight status %d", rec.Code)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Errorf("allow origin %q", got)
+	}
+	if got := strings.ToLower(rec.Header().Get("Access-Control-Allow-Headers")); !strings.Contains(got, "authorization") || !strings.Contains(got, "content-type") {
+		t.Errorf("allow headers %q", got)
+	}
+	if !strings.Contains(rec.Header().Get("Access-Control-Allow-Methods"), "POST") {
+		t.Errorf("allow methods %q", rec.Header().Get("Access-Control-Allow-Methods"))
+	}
+	if rec.Header().Get("Access-Control-Allow-Private-Network") != "true" {
+		t.Error("a browser on a public site asking for a private network gets a yes")
+	}
+	// A real request, even one refused for its key, carries the header, so the page can read the refusal.
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Origin", "https://annai.guide")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized || rec.Header().Get("Access-Control-Allow-Origin") != "*" {
+		t.Errorf("models without a key: %d, allow origin %q", rec.Code, rec.Header().Get("Access-Control-Allow-Origin"))
+	}
+}
+
+func TestCORSNeverCoversTheWebUI(t *testing.T) {
+	h := corsServer(t, "")
+	req := httptest.NewRequest(http.MethodGet, "/ui/logs", nil)
+	req.Header.Set("Origin", "https://evil.example")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Error("the web UI has no key, so other sites must not read it")
+	}
+	if rec := preflight(h, "/ui/logs", "https://evil.example"); rec.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Error("no preflight answer for the web UI either")
+	}
+}
+
+func TestCORSCanBeTurnedOffOrLimited(t *testing.T) {
+	off := corsServer(t, "cors = false\n")
+	if rec := preflight(off, "/v1/chat/completions", "https://annai.guide"); rec.Header().Get("Access-Control-Allow-Origin") != "" || rec.Code == http.StatusNoContent {
+		t.Errorf("cors = false: status %d, allow origin %q", rec.Code, rec.Header().Get("Access-Control-Allow-Origin"))
+	}
+	limited := corsServer(t, "cors_origins = [\"https://annai.guide\"]\n")
+	rec := preflight(limited, "/v1/chat/completions", "https://annai.guide")
+	if rec.Code != http.StatusNoContent || rec.Header().Get("Access-Control-Allow-Origin") != "https://annai.guide" || !strings.Contains(rec.Header().Get("Vary"), "Origin") {
+		t.Errorf("listed origin: status %d, allow origin %q, vary %q", rec.Code, rec.Header().Get("Access-Control-Allow-Origin"), rec.Header().Get("Vary"))
+	}
+	if rec := preflight(limited, "/v1/chat/completions", "https://other.example"); rec.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Error("an origin not listed gets no allow header")
+	}
+}

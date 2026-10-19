@@ -79,6 +79,16 @@ type Server struct {
 	// GeneratedClientKey is set when client_keys was empty and a random key
 	// was generated to secure the inbound API. Empty otherwise.
 	GeneratedClientKey string
+
+	// CORS lets web apps in a browser (such as annai) call the API (/v1/... and
+	// /healthz, never the web UI). On by default: the API asks for a client key
+	// in the Authorization header and uses no cookies, so allowing other origins
+	// gives a page nothing it could not do with the key anyway. cors = false
+	// turns it off.
+	CORS bool
+	// CORSOrigins limits CORS to these exact origins (e.g. "https://annai.guide").
+	// Empty means any origin.
+	CORSOrigins []string
 }
 
 // Provider is a single downstream provider after same-name entries are merged.
@@ -153,8 +163,10 @@ type rawServer struct {
 	GoodFinishReasons []string `toml:"good_finish_reasons"`
 	// Poll interval for automatic config reload (e.g. "3s"). "0" disables
 	// polling; SIGHUP / systemctl reload still reloads. Default: 3s.
-	ConfigReloadInterval    string `toml:"config_reload_interval"`
-	CoerceTrailingAssistant *bool  `toml:"coerce_trailing_assistant"`
+	ConfigReloadInterval    string   `toml:"config_reload_interval"`
+	CoerceTrailingAssistant *bool    `toml:"coerce_trailing_assistant"`
+	CORS                    *bool    `toml:"cors"`
+	CORSOrigins             []string `toml:"cors_origins"`
 }
 
 type rawProvider struct {
@@ -198,10 +210,12 @@ func build(raw rawConfig) (*Config, error) {
 
 	// Server section with defaults.
 	srv := Server{
-		Listen:     firstNonEmpty(raw.Server.Listen, DefaultListen),
-		LogDir:     firstNonEmpty(raw.Server.LogDir, DefaultLogDir),
-		ClientKeys: raw.Server.ClientKeys,
-		MaxRetries: raw.Server.MaxRetries,
+		Listen:      firstNonEmpty(raw.Server.Listen, DefaultListen),
+		LogDir:      firstNonEmpty(raw.Server.LogDir, DefaultLogDir),
+		ClientKeys:  raw.Server.ClientKeys,
+		MaxRetries:  raw.Server.MaxRetries,
+		CORS:        raw.Server.CORS == nil || *raw.Server.CORS,
+		CORSOrigins: raw.Server.CORSOrigins,
 	}
 	// When no client keys are configured, generate a random one so the inbound
 	// API is secured by default rather than left open.

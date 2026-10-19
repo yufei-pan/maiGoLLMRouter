@@ -31,6 +31,12 @@ max_retries = 2
 # "length" means the client-requested max_tokens limit was hit (a normal completion).
 good_finish_reasons = ["stop", "length", "tool_calls", "function_call", "end_turn"]
 
+# Let web apps in a browser (such as annai) call the API (/v1/... and /healthz,
+# never the web UI). Default true; the client key still guards every call.
+# cors = true
+# Limit it to these origins; empty allows any.
+# cors_origins = ["https://annai.guide"]
+
 # When the last chat/responses turn is assistant (etc.), rewrite it to user and
 # flip first-person pronouns in that turn. Applies to all models. Default true.
 # coerce_trailing_assistant = true
