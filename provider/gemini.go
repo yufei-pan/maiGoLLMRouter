@@ -12,7 +12,7 @@ import (
 // passed through, either to the top level (geminiTopLevel) or, by default, into
 // generationConfig (#13).
 var geminiConsumed = map[string]bool{
-	"model": true, "messages": true, "input": true, "stream": true,
+	"model": true, "messages": true, "input": true, "stream": true, "stream_options": true,
 	"temperature": true, "top_p": true, "max_tokens": true,
 	"max_completion_tokens": true, "stop": true, "n": true,
 	"encoding_format": true, "dimensions": true, "user": true,

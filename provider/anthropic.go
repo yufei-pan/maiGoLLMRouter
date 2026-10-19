@@ -16,7 +16,7 @@ const defaultAnthropicMaxTokens = 8192
 // anthropicConsumed lists OpenAI fields handled explicitly; everything else is
 // merged into the top-level request body as passthrough (#13).
 var anthropicConsumed = map[string]bool{
-	"model": true, "messages": true, "input": true, "stream": true,
+	"model": true, "messages": true, "input": true, "stream": true, "stream_options": true,
 	"max_tokens": true, "max_completion_tokens": true, "stop": true, "n": true,
 	"tools": true, "tool_choice": true, "functions": true, "function_call": true,
 	"response_format": true, // consumed (dropped): Anthropic uses a different API

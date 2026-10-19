@@ -226,3 +226,21 @@ func TestCallStreamAnthropicIsBuffered(t *testing.T) {
 		t.Errorf("finish = %q", resp.FinishReason)
 	}
 }
+
+// TestStreamOptionsNeverReachTranslatedDialects verifies stream_options, which
+// only the OpenAI dialect understands, is not passed through to Gemini (where
+// it lands in generationConfig and is refused) or Anthropic.
+func TestStreamOptionsNeverReachTranslatedDialects(t *testing.T) {
+	body := geminiChatBodyForStream(true)
+	g := buildGeminiChatBody(Request{Op: OpChat, Model: "gemini-3.5-flash", Body: body})
+	if gc, _ := g["generationConfig"].(map[string]any); gc["stream_options"] != nil {
+		t.Errorf("Gemini generationConfig = %v, want no stream_options", gc)
+	}
+	if _, has := g["stream_options"]; has {
+		t.Error("Gemini body has stream_options")
+	}
+	a := buildAnthropicBody(Request{Op: OpChat, Model: "claude", Body: body})
+	if _, has := a["stream_options"]; has {
+		t.Errorf("Anthropic body = %v, want no stream_options", a)
+	}
+}
