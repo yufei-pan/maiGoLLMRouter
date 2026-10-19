@@ -24,7 +24,7 @@ func (f Frame) Encode() []byte {
 		b.WriteString(f.Event)
 		b.WriteByte('\n')
 	}
-	for _, line := range bytes.Split(f.Data, []byte("\n")) {
+	for line := range bytes.SplitSeq(f.Data, []byte("\n")) {
 		b.WriteString("data: ")
 		b.Write(line)
 		b.WriteByte('\n')
