@@ -211,14 +211,16 @@ func TestStepfunTranscriptionRejectsOddFormats(t *testing.T) {
 // spare a key, never condemn one.
 func TestStepfunErrorEventsBlackOutOnlyForKeyFaults(t *testing.T) {
 	for event, noBlackout := range map[string]bool{
-		`{"type":"error","message":"internal error"}`:                              true,
-		`{"type":"error","message":"invalid audio format"}`:                        true,
-		`{"type":"error","message":"quota exceeded"}`:                              true,
-		`{"type":"error","message":"invalid api key"}`:                             true,
-		`{"type":"error","code":"insufficient_quota","message":"out of credit"}`:   false,
-		`{"type":"error","code":"invalid_api_key","message":"bad key"}`:            false,
-		`{"type":"error","code":"rate_limit_exceeded","message":"slow down"}`:      false,
-		`{"type":"error","code":"rate_limit_exceeded","message":"invalid format"}`: false,
+		`{"type":"error","message":"internal error"}`: true,
+		// stepfun's own event for an empty clip, seen live on 2026-10-19
+		`{"type":"error","meta":{"session_id":"x"},"code":"invalid_value","message":"audio.data or audio.url is required"}`: true,
+		`{"type":"error","message":"invalid audio format"}`:                                                                 true,
+		`{"type":"error","message":"quota exceeded"}`:                                                                       true,
+		`{"type":"error","message":"invalid api key"}`:                                                                      true,
+		`{"type":"error","code":"insufficient_quota","message":"out of credit"}`:                                            false,
+		`{"type":"error","code":"invalid_api_key","message":"bad key"}`:                                                     false,
+		`{"type":"error","code":"rate_limit_exceeded","message":"slow down"}`:                                               false,
+		`{"type":"error","code":"rate_limit_exceeded","message":"invalid format"}`:                                          false,
 	} {
 		srv := stepfunASR(t, nil, event)
 		resp, _ := Call(context.Background(), srv.Client(), "openai", srv.URL, "k",

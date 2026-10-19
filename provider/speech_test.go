@@ -144,3 +144,23 @@ func TestAnthropicSpeechIsIncompatible(t *testing.T) {
 		t.Errorf("err %v, response %+v", err, resp)
 	}
 }
+
+// TestGeminiSpeechDropsInstructions verifies Gemini's TTS models never get
+// instructions: they refuse systemInstruction ("Developer instruction is not
+// enabled for this model", checked live on 2026-10-19), and putting style in
+// the text would have it read aloud.
+func TestGeminiSpeechDropsInstructions(t *testing.T) {
+	var sent map[string]any
+	srv := speechServer(t, nil, &sent, func(w http.ResponseWriter) {
+		fmt.Fprint(w, `{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"audio/wav","data":"UklGRg=="}}]}}]}`)
+	})
+	if _, err := Call(context.Background(), srv.Client(), "gemini", srv.URL, "k", speechReq("g-tts", "", SpeechRequest{Input: "Hi", Instructions: "Speak slowly"})); err != nil {
+		t.Fatal(err)
+	}
+	if _, has := sent["systemInstruction"]; has {
+		t.Errorf("Gemini got systemInstruction: %v", sent["systemInstruction"])
+	}
+	if b, _ := json.Marshal(sent); strings.Contains(string(b), "Speak slowly") {
+		t.Errorf("the instructions reached Gemini: %s", b)
+	}
+}

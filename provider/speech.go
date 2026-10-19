@@ -101,9 +101,9 @@ func geminiSpeech(ctx context.Context, client *http.Client, baseURL, apiKey stri
 			},
 		},
 	}
-	if sp.Instructions != "" {
-		body["systemInstruction"] = map[string]any{"parts": []any{map[string]any{"text": sp.Instructions}}}
-	}
+	// Instructions are dropped: Gemini's TTS models refuse systemInstruction
+	// ("Developer instruction is not enabled for this model"), and style put
+	// in the text would be read aloud.
 	out := mustJSON(body)
 	url := baseURL + "/" + geminiModelPath(req.Model) + ":generateContent"
 	status, raw, err := doJSON(ctx, client, http.MethodPost, url, map[string]string{"x-goog-api-key": apiKey}, out)
