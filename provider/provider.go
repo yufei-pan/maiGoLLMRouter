@@ -21,7 +21,8 @@ const (
 	OpChat Operation = iota
 	OpEmbed
 	OpResponses
-	OpSpeech // /v1/audio/speech: Request.Speech
+	OpSpeech     // /v1/audio/speech: Request.Speech
+	OpTranscribe // /v1/audio/transcriptions: Request.Transcription
 )
 
 // ResponsesMode selects how an OpResponses request reaches a downstream that
@@ -43,9 +44,10 @@ type Request struct {
 	ResponsesMode ResponsesMode  // OpResponses only; meaningful for kind "openai"
 	Provider      string         // provider name; with Model, names who signed a Gemini tool call
 	Signatures    *SignatureCache
-	Speech        *SpeechRequest // OpSpeech only
-	AudioAPI      string         // the provider's audio dialect: "openai" or "stepfun"
-	FFmpeg        string         // ffmpeg program, for converting audio a provider can't read
+	Speech        *SpeechRequest        // OpSpeech only
+	Transcription *TranscriptionRequest // OpTranscribe only
+	AudioAPI      string                // the provider's audio dialect: "openai" or "stepfun"
+	FFmpeg        string                // ffmpeg program, for converting audio a provider can't read
 }
 
 // signer names the provider/model that writes this request's reply.
@@ -82,6 +84,8 @@ func Call(ctx context.Context, client *http.Client, kind, baseURL, apiKey string
 	var err error
 	if req.Op == OpSpeech {
 		resp, err = callSpeech(ctx, client, kind, baseURL, apiKey, req)
+	} else if req.Op == OpTranscribe {
+		resp, err = callTranscription(ctx, client, kind, baseURL, apiKey, req)
 	} else if req.Op == OpResponses && kind != "openai" {
 		resp, err = callResponsesViaChat(ctx, client, kind, baseURL, apiKey, req)
 	} else {
