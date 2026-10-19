@@ -245,7 +245,7 @@ func collectToolCallNames(msgs []any) map[string]string {
 }
 
 // geminiUserParts converts OpenAI user content (string or parts, including
-// image_url and file) into Gemini parts. Text-only content stays a single text part.
+// image_url, file and input_audio) into Gemini parts. Text-only content stays a single text part.
 func geminiUserParts(content any) []map[string]any {
 	parts := openAIContentParts(content)
 	if len(parts) == 0 {
@@ -266,12 +266,33 @@ func geminiUserParts(content any) []map[string]any {
 			if block := geminiFilePart(p["file"]); block != nil {
 				out = append(out, block)
 			}
+		case "input_audio":
+			if block := geminiAudioPart(p["input_audio"]); block != nil {
+				out = append(out, block)
+			}
 		}
 	}
 	if len(out) == 0 {
 		return []map[string]any{{"text": contentToText(content)}}
 	}
 	return out
+}
+
+// geminiAudioPart turns an OpenAI input_audio ({data, format}, data possibly a
+// data URI) into Gemini inline audio.
+func geminiAudioPart(v any) map[string]any {
+	ia, ok := v.(map[string]any)
+	if !ok {
+		return nil
+	}
+	mime, data := splitDataURI(asString(ia, "data"))
+	if data == "" {
+		return nil
+	}
+	if mime == "" {
+		mime = geminiAudioMIME(asString(ia, "format"))
+	}
+	return map[string]any{"inlineData": map[string]any{"mimeType": mime, "data": data}}
 }
 
 func geminiImagePart(imageURL any) map[string]any {
