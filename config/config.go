@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"slices"
 	"strings"
 	"time"
 
@@ -19,6 +20,8 @@ const (
 	DefaultGlobalBlackout = 60 * time.Second
 	DefaultMaxRetries     = 2
 	DefaultTimeout        = 60 * time.Second
+	DefaultFFmpeg         = "ffmpeg"
+	DefaultAudioTimeout   = 10 * time.Second
 	// DefaultLogRetentionDays is how long detail log files are kept before
 	// cleanup. Roughly two months. Set log_retention_days = 0 to disable.
 	DefaultLogRetentionDays = 60
@@ -95,6 +98,22 @@ type Server struct {
 	// still answers such a request as a stream, but only once the reply is
 	// complete.
 	Streaming bool
+
+	// FFmpeg is the ffmpeg program used to convert speech (e.g. to Opus).
+	FFmpeg string
+	// AudioTimeout limits each speech or transcription attempt (the shorter of
+	// it and the provider's timeout), so a hung provider is failed over in time.
+	AudioTimeout time.Duration
+}
+
+// SpeechFormats are the speech formats a client may ask for, and a speech
+// target may ask its provider for.
+var SpeechFormats = []string{"opus", "mp3", "aac", "flac", "wav", "pcm"}
+
+// SpeechTarget holds a route's speech settings for one of its targets.
+type SpeechTarget struct {
+	Voice  string // the voice to use on this target; empty: the client's
+	Format string // what to ask an OpenAI-kind provider for; empty: pcm
 }
 
 // Provider is a single downstream provider after same-name entries are merged.
@@ -106,6 +125,10 @@ type Provider struct {
 	Keys           []string // normal keys (random selection, blackout on failure)
 	FallbackKeys   []string // tried in order, never blacked out
 	FallbackModels []string // models allowed on fallback keys (empty => all allowed)
+
+	// Audio selects the audio API dialect for kind=openai: "openai" (default)
+	// or "stepfun", whose transcription lives on its own SSE route.
+	Audio string
 
 	// SupportsResponses controls Responses API routing for kind=openai.
 	// nil = unset (probe then cache); non-nil true forces /responses;
@@ -149,6 +172,8 @@ type Target struct {
 type ModelRoute struct {
 	Targets   []Target
 	Selection string // TargetSelectionSequential or TargetSelectionShuffle
+	// Speech holds per-target speech settings, keyed by "provider/model".
+	Speech map[string]SpeechTarget
 }
 
 // raw* types mirror the on-disk TOML layout before normalization.
@@ -174,6 +199,8 @@ type rawServer struct {
 	CORS                    *bool    `toml:"cors"`
 	CORSOrigins             []string `toml:"cors_origins"`
 	Streaming               *bool    `toml:"streaming"`
+	FFmpeg                  string   `toml:"ffmpeg"`
+	AudioTimeout            string   `toml:"audio_timeout"`
 }
 
 type rawProvider struct {
@@ -185,11 +212,18 @@ type rawProvider struct {
 	FallbackKeys      []string `toml:"fallback_keys"`
 	FallbackModels    []string `toml:"fallback_models"`
 	SupportsResponses *bool    `toml:"supports_responses"`
+	Audio             string   `toml:"audio"`
 }
 
 type rawModel struct {
-	Targets   []string `toml:"targets"`
-	Selection string   `toml:"selection"` // sequential (default) | shuffle
+	Targets   []string                   `toml:"targets"`
+	Selection string                     `toml:"selection"` // sequential (default) | shuffle
+	Speech    map[string]rawSpeechTarget `toml:"speech"`    // keyed by "provider/model"
+}
+
+type rawSpeechTarget struct {
+	Voice  string `toml:"voice"`
+	Format string `toml:"format"`
 }
 
 type rawRouting struct {
@@ -288,6 +322,18 @@ func build(raw rawConfig) (*Config, error) {
 	if raw.Server.Streaming != nil {
 		srv.Streaming = *raw.Server.Streaming
 	}
+	srv.FFmpeg = DefaultFFmpeg
+	if f := strings.TrimSpace(raw.Server.FFmpeg); f != "" {
+		srv.FFmpeg = f
+	}
+	srv.AudioTimeout = DefaultAudioTimeout
+	if raw.Server.AudioTimeout != "" {
+		d, err := time.ParseDuration(raw.Server.AudioTimeout)
+		if err != nil || d <= 0 {
+			return nil, fmt.Errorf("server.audio_timeout: must be a positive duration, got %q", raw.Server.AudioTimeout)
+		}
+		srv.AudioTimeout = d
+	}
 	cfg.Server = srv
 
 	// Merge providers by name (#17 combine keys, #18 later timeout/base/kind wins).
@@ -330,6 +376,9 @@ func build(raw rawConfig) (*Config, error) {
 			v := *rp.SupportsResponses
 			p.SupportsResponses = &v
 		}
+		if a := strings.ToLower(strings.TrimSpace(rp.Audio)); a != "" {
+			p.Audio = a
+		}
 	}
 
 	for name, p := range cfg.Providers {
@@ -343,6 +392,14 @@ func build(raw rawConfig) (*Config, error) {
 		}
 		if p.BaseURL == "" {
 			return nil, fmt.Errorf("provider %q: missing base_url", name)
+		}
+		switch {
+		case p.Audio == "":
+			p.Audio = "openai"
+		case p.Audio != "openai" && p.Audio != "stepfun":
+			return nil, fmt.Errorf("provider %q: unknown audio %q (want \"openai\" or \"stepfun\")", name, p.Audio)
+		case p.Kind != "openai":
+			return nil, fmt.Errorf("provider %q: audio is only for kind \"openai\"", name)
 		}
 		p.fallbackModelSet = make(map[string]bool, len(p.FallbackModels))
 		for _, m := range p.FallbackModels {
@@ -370,7 +427,11 @@ func build(raw rawConfig) (*Config, error) {
 		if err != nil {
 			return nil, err
 		}
-		cfg.Models[name] = ModelRoute{Targets: targets, Selection: modelSelection[name]}
+		speech, err := routeSpeech(name, raw.Model, targets)
+		if err != nil {
+			return nil, err
+		}
+		cfg.Models[name] = ModelRoute{Targets: targets, Selection: modelSelection[name], Speech: speech}
 	}
 
 	// Resolve the fallback providers list. The deprecated singular
@@ -406,6 +467,40 @@ func build(raw rawConfig) (*Config, error) {
 	cfg.FallbackSelection = sel
 
 	return cfg, nil
+}
+
+// routeSpeech builds a route's per-target speech settings: those of the routes
+// it includes (in order), then its own on top. Its own keys must name one of
+// its expanded targets. expandModel has already ruled out cycles.
+func routeSpeech(name string, raw map[string]rawModel, targets []Target) (map[string]SpeechTarget, error) {
+	valid := make(map[string]bool, len(targets))
+	for _, t := range targets {
+		valid[t.Provider+"/"+t.Model] = true
+	}
+	out := make(map[string]SpeechTarget)
+	for _, t := range raw[name].Targets {
+		if _, nested := raw[t]; !nested {
+			continue
+		}
+		inner, err := routeSpeech(t, raw, nil)
+		if err != nil {
+			return nil, err
+		}
+		for k, v := range inner {
+			out[k] = v
+		}
+	}
+	for key, rs := range raw[name].Speech {
+		if targets != nil && !valid[key] {
+			return nil, fmt.Errorf("model %q: speech settings for %q, which is not one of its targets", name, key)
+		}
+		format := strings.ToLower(strings.TrimSpace(rs.Format))
+		if format != "" && !slices.Contains(SpeechFormats, format) {
+			return nil, fmt.Errorf("model %q: speech %q: unknown format %q (want one of %s)", name, key, rs.Format, strings.Join(SpeechFormats, ", "))
+		}
+		out[key] = SpeechTarget{Voice: strings.TrimSpace(rs.Voice), Format: format}
+	}
+	return out, nil
 }
 
 // expandModel resolves one model's target list into a flat slice of Targets.

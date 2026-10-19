@@ -42,6 +42,13 @@ good_finish_reasons = ["stop", "length", "tool_calls", "function_call", "end_tur
 # reply is complete. Default true.
 # streaming = true
 
+# ffmpeg converts speech to the format a client asks for (e.g. Opus). Default
+# "ffmpeg", found on PATH. Without it, speech is sent as the provider made it.
+# ffmpeg = "/usr/bin/ffmpeg"
+# Time limit for each speech or transcription attempt: the shorter of this and
+# the provider's timeout, so a hung provider is failed over in time. Default 10s.
+# audio_timeout = "10s"
+
 # When the last chat/responses turn is assistant (etc.), rewrite it to user and
 # flip first-person pronouns in that turn. Applies to all models. Default true.
 # coerce_trailing_assistant = true
@@ -64,6 +71,8 @@ good_finish_reasons = ["stop", "length", "tool_calls", "function_call", "end_tur
 #  - supports_responses: optional. true = always POST /responses;
 #    false = never probe, Chat-translate portable Responses inbound;
 #    omit = probe /responses once, cache Chat-only until config reload.
+#  - audio: optional, for kind "openai". "stepfun" when the provider speaks
+#    stepfun's audio API (its transcription lives on /audio/asr/sse); default "openai".
 # ---------------------------------------------------------------------------
 
 [[provider]]
@@ -117,6 +126,16 @@ targets = ["google/gemini-3.5-flash","free"]
 
 [model."gemini-embedding-2"]
 targets = ["google/gemini-embedding-2"]
+
+# A speech route (POST /v1/audio/speech). Voices differ by provider, so each
+# target can name its own; format is what to ask an OpenAI-kind provider for
+# (default pcm, converted to the client's format).
+# [model."shiori-voice"]
+# targets = ["google/gemini-3.8-flash-lite-tts", "stepfun/stepaudio-2.5-tts"]
+# [model."shiori-voice".speech."google/gemini-3.8-flash-lite-tts"]
+# voice = "Kore"
+# [model."shiori-voice".speech."stepfun/stepaudio-2.5-tts"]
+# voice = "zixinnansheng"
 
 # ---------------------------------------------------------------------------
 # Unrecognized inbound model names:

@@ -410,3 +410,152 @@ streaming = false
 		t.Error("streaming = false turns it off")
 	}
 }
+
+func TestAudioServerDefaults(t *testing.T) {
+	cfg, err := Load(writeTemp(t, `
+[server]
+client_keys = ["k"]
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Server.FFmpeg != "ffmpeg" || cfg.Server.AudioTimeout != 10*time.Second {
+		t.Errorf("defaults: ffmpeg=%q audio_timeout=%v", cfg.Server.FFmpeg, cfg.Server.AudioTimeout)
+	}
+	cfg, err = Load(writeTemp(t, `
+[server]
+client_keys = ["k"]
+ffmpeg = "/usr/bin/ffmpeg"
+audio_timeout = "4s"
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Server.FFmpeg != "/usr/bin/ffmpeg" || cfg.Server.AudioTimeout != 4*time.Second {
+		t.Errorf("set: ffmpeg=%q audio_timeout=%v", cfg.Server.FFmpeg, cfg.Server.AudioTimeout)
+	}
+}
+
+func TestProviderAudioOption(t *testing.T) {
+	provider := func(kind, audio string) string {
+		return `
+[server]
+client_keys = ["k"]
+
+[[provider]]
+name = "p"
+kind = "` + kind + `"
+base_url = "https://example.com/v1"
+keys = ["x"]
+` + audio
+	}
+	cfg, err := Load(writeTemp(t, provider("openai", `audio = "stepfun"`)))
+	if err != nil || cfg.Providers["p"].Audio != "stepfun" {
+		t.Fatalf("stepfun on openai: %v, %+v", err, cfg)
+	}
+	cfg, err = Load(writeTemp(t, provider("openai", "")))
+	if err != nil || cfg.Providers["p"].Audio != "openai" {
+		t.Fatalf("default: %v", err)
+	}
+	if _, err := Load(writeTemp(t, provider("gemini", `audio = "stepfun"`))); err == nil {
+		t.Error("audio on a gemini provider should be an error")
+	}
+	if _, err := Load(writeTemp(t, provider("openai", `audio = "whisper"`))); err == nil {
+		t.Error("an unknown audio value should be an error")
+	}
+}
+
+const speechRouteConfig = `
+[server]
+client_keys = ["k"]
+
+[[provider]]
+name = "google"
+kind = "gemini"
+base_url = "https://example.com/v1beta"
+keys = ["x"]
+
+[[provider]]
+name = "openrouter"
+kind = "openai"
+base_url = "https://example.com/v1"
+keys = ["x"]
+
+[[provider]]
+name = "stepfun"
+kind = "openai"
+base_url = "https://example.com/v1"
+keys = ["x"]
+audio = "stepfun"
+
+[model."shiori-voice"]
+targets = ["google/gemini-3.8-flash-lite-tts", "openrouter/google/gemini-3.8-flash-lite-tts", "stepfun/stepaudio-2.5-tts"]
+
+[model."shiori-voice".speech."google/gemini-3.8-flash-lite-tts"]
+voice = "Kore"
+
+[model."shiori-voice".speech."openrouter/google/gemini-3.8-flash-lite-tts"]
+voice = "Kore"
+%s
+
+[model."shiori-voice".speech."%s"]
+voice = "zixinnansheng"
+`
+
+func TestRouteSpeechSettings(t *testing.T) {
+	cfg, err := Load(writeTemp(t, fmt.Sprintf(speechRouteConfig, "", "stepfun/stepaudio-2.5-tts")))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	sp := cfg.Models["shiori-voice"].Speech
+	if sp["google/gemini-3.8-flash-lite-tts"].Voice != "Kore" || sp["stepfun/stepaudio-2.5-tts"].Voice != "zixinnansheng" {
+		t.Errorf("speech settings = %+v", sp)
+	}
+	if _, err := Load(writeTemp(t, fmt.Sprintf(speechRouteConfig, `format = "ogg"`, "stepfun/stepaudio-2.5-tts"))); err == nil {
+		t.Error(`format = "ogg" should be an error`)
+	}
+	if _, err := Load(writeTemp(t, fmt.Sprintf(speechRouteConfig, "", "stepfun/other-model"))); err == nil {
+		t.Error("a speech key naming no target should be an error")
+	}
+}
+
+func TestNestedRouteSpeechSettings(t *testing.T) {
+	cfg, err := Load(writeTemp(t, `
+[server]
+client_keys = ["k"]
+
+[[provider]]
+name = "google"
+kind = "gemini"
+base_url = "https://example.com/v1beta"
+keys = ["x"]
+
+[[provider]]
+name = "stepfun"
+kind = "openai"
+base_url = "https://example.com/v1"
+keys = ["x"]
+
+[model."a"]
+targets = ["google/x"]
+
+[model."a".speech."google/x"]
+voice = "Kore"
+
+[model."b"]
+targets = ["a", "stepfun/y"]
+
+[model."b".speech."stepfun/y"]
+voice = "zixinnansheng"
+
+[model."b".speech."google/x"]
+voice = "Puck"
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	b, a := cfg.Models["b"].Speech, cfg.Models["a"].Speech
+	if b["google/x"].Voice != "Puck" || b["stepfun/y"].Voice != "zixinnansheng" || a["google/x"].Voice != "Kore" {
+		t.Errorf("a = %+v, b = %+v", a, b)
+	}
+}
