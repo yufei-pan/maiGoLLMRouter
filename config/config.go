@@ -89,6 +89,12 @@ type Server struct {
 	// CORSOrigins limits CORS to these exact origins (e.g. "https://annai.guide").
 	// Empty means any origin.
 	CORSOrigins []string
+
+	// Streaming sends a request that asks for a stream ("stream": true) as one,
+	// piece by piece as the provider writes it. On by default; streaming = false
+	// still answers such a request as a stream, but only once the reply is
+	// complete.
+	Streaming bool
 }
 
 // Provider is a single downstream provider after same-name entries are merged.
@@ -167,6 +173,7 @@ type rawServer struct {
 	CoerceTrailingAssistant *bool    `toml:"coerce_trailing_assistant"`
 	CORS                    *bool    `toml:"cors"`
 	CORSOrigins             []string `toml:"cors_origins"`
+	Streaming               *bool    `toml:"streaming"`
 }
 
 type rawProvider struct {
@@ -276,6 +283,10 @@ func build(raw rawConfig) (*Config, error) {
 	srv.CoerceTrailingAssistant = true
 	if raw.Server.CoerceTrailingAssistant != nil {
 		srv.CoerceTrailingAssistant = *raw.Server.CoerceTrailingAssistant
+	}
+	srv.Streaming = true
+	if raw.Server.Streaming != nil {
+		srv.Streaming = *raw.Server.Streaming
 	}
 	cfg.Server = srv
 

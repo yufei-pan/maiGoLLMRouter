@@ -383,3 +383,30 @@ cors_origins = ["https://annai.guide"]
 		t.Errorf("cors_origins: %+v", cfg.Server.CORSOrigins)
 	}
 }
+
+func TestStreamingDefaultsOn(t *testing.T) {
+	cfg, err := Load(writeTemp(t, `
+[server]
+client_keys = ["k"]
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.Server.Streaming {
+		t.Error("streaming should be on when the config doesn't mention it")
+	}
+}
+
+func TestStreamingCanBeTurnedOff(t *testing.T) {
+	cfg, err := Load(writeTemp(t, `
+[server]
+client_keys = ["k"]
+streaming = false
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Server.Streaming {
+		t.Error("streaming = false turns it off")
+	}
+}

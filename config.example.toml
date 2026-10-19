@@ -37,6 +37,11 @@ good_finish_reasons = ["stop", "length", "tool_calls", "function_call", "end_tur
 # Limit it to these origins; empty allows any.
 # cors_origins = ["https://annai.guide"]
 
+# Send a request that asks for a stream ("stream": true) piece by piece as the
+# provider writes it. false still answers it as a stream, but only once the
+# reply is complete. Default true.
+# streaming = true
+
 # When the last chat/responses turn is assistant (etc.), rewrite it to user and
 # flip first-person pronouns in that turn. Applies to all models. Default true.
 # coerce_trailing_assistant = true

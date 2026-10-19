@@ -30,19 +30,22 @@ type Router struct {
 // request loads it once and keeps it to the end, so a reload never waits for
 // requests already being routed and never changes them midway.
 type routerState struct {
-	cfg      *config.Config
-	clients  map[string]*http.Client
-	respCaps *responsesCapability
+	cfg           *config.Config
+	clients       map[string]*http.Client
+	streamClients map[string]*http.Client // no Client.Timeout: a stream's limits are timers
+	respCaps      *responsesCapability
 }
 
 func newRouterState(cfg *config.Config) *routerState {
 	st := &routerState{
-		cfg:      cfg,
-		clients:  make(map[string]*http.Client, len(cfg.Providers)),
-		respCaps: newResponsesCapability(),
+		cfg:           cfg,
+		clients:       make(map[string]*http.Client, len(cfg.Providers)),
+		streamClients: make(map[string]*http.Client, len(cfg.Providers)),
+		respCaps:      newResponsesCapability(),
 	}
 	for name, p := range cfg.Providers {
 		st.clients[name] = &http.Client{Timeout: p.Timeout}
+		st.streamClients[name] = &http.Client{}
 	}
 	return st
 }
@@ -91,6 +94,9 @@ type Result struct {
 	Model    string    `json:"model,omitempty"`
 	Targets  []string  `json:"targets"`
 	Attempts []Attempt `json:"attempts"`
+	// Committed reports that the reply went out through a StreamSink; when
+	// false, Status and Body are to be sent as a JSON reply.
+	Committed bool `json:"-"`
 }
 
 type outcome int
@@ -156,19 +162,51 @@ func (st *routerState) fallbackTargets(model string) []config.Target {
 // result along with a per-attempt log.
 func (r *Router) Execute(ctx context.Context, op provider.Operation, inboundModel string, body map[string]any) *Result {
 	st := r.state.Load()
+	res, last, done := r.run(ctx, st, op, inboundModel, body, r.tryKey)
+	if done {
+		return res
+	}
 
-	res := &Result{}
+	// Everything exhausted. When no target could even accept the request, the
+	// fault is in the request, not in the providers.
+	if onlyIncompatible(res.Attempts) {
+		res.Status = http.StatusBadRequest
+		res.Body = errorBody(incompatibleMessage, "invalid_request_error")
+		return res
+	}
+	if last != nil && len(last.OpenAIBody) > 0 {
+		res.Status = exhaustedHTTPStatus(last)
+		res.Body = last.OpenAIBody
+	} else {
+		res.Status = http.StatusBadGateway
+		res.Body = errorBody(exhaustedMessage, "upstream_error")
+	}
+	return res
+}
+
+const (
+	incompatibleMessage = "this request uses Responses-only features that no configured target for this model can serve; route it to a provider with a /responses route"
+	exhaustedMessage    = "all providers, keys, and models were exhausted"
+)
+
+// tryFunc makes one call on one key; see tryKey for done and skip.
+type tryFunc func(ctx context.Context, st *routerState, res *Result, p *config.Provider, model string, op provider.Operation, body map[string]any, key, keyType string, last **provider.Response) (done, skip bool)
+
+// run resolves the targets and tries the normal keys, then the fallback keys,
+// with try. done reports that the run is finished and res complete; otherwise
+// every key was exhausted and last is the last real reply, for the caller's
+// answer.
+func (r *Router) run(ctx context.Context, st *routerState, op provider.Operation, inboundModel string, body map[string]any, try tryFunc) (res *Result, last *provider.Response, done bool) {
+	res = &Result{}
 	targets, err := st.resolve(inboundModel)
 	if err != nil {
 		res.Status = http.StatusBadRequest
 		res.Body = errorBody(err.Error(), "invalid_request_error")
-		return res
+		return res, nil, true
 	}
 	for _, t := range targets {
 		res.Targets = append(res.Targets, t.Provider+"/"+t.Model)
 	}
-
-	var last *provider.Response
 
 	// prohibited tracks provider/model combos that returned a content-policy
 	// block. Such a result is deterministic for the combo regardless of key, so
@@ -197,9 +235,9 @@ func (r *Router) Execute(ctx context.Context, op provider.Operation, inboundMode
 				notifyAttempt(ctx, att)
 				continue
 			}
-			done, skip := r.tryKey(ctx, st, res, p, t.Model, op, body, key, "normal", &last)
+			done, skip := try(ctx, st, res, p, t.Model, op, body, key, "normal", &last)
 			if done {
-				return res
+				return res, last, true
 			}
 			if skip {
 				prohibited[targetKey(t)] = true
@@ -219,9 +257,9 @@ func (r *Router) Execute(ctx context.Context, op provider.Operation, inboundMode
 			continue
 		}
 		for _, key := range p.FallbackKeySet() {
-			done, skip := r.tryKey(ctx, st, res, p, t.Model, op, body, key, "fallback", &last)
+			done, skip := try(ctx, st, res, p, t.Model, op, body, key, "fallback", &last)
 			if done {
-				return res
+				return res, last, true
 			}
 			if skip {
 				prohibited[targetKey(t)] = true
@@ -230,21 +268,7 @@ func (r *Router) Execute(ctx context.Context, op provider.Operation, inboundMode
 		}
 	}
 
-	// Everything exhausted. When no target could even accept the request, the
-	// fault is in the request, not in the providers.
-	if onlyIncompatible(res.Attempts) {
-		res.Status = http.StatusBadRequest
-		res.Body = errorBody("this request uses Responses-only features that no configured target for this model can serve; route it to a provider with a /responses route", "invalid_request_error")
-		return res
-	}
-	if last != nil && len(last.OpenAIBody) > 0 {
-		res.Status = exhaustedHTTPStatus(last)
-		res.Body = last.OpenAIBody
-	} else {
-		res.Status = http.StatusBadGateway
-		res.Body = errorBody("all providers, keys, and models were exhausted", "upstream_error")
-	}
-	return res
+	return res, last, false
 }
 
 // tryKey performs a single call on one key. The done return is true when the
@@ -262,6 +286,12 @@ func (r *Router) Execute(ctx context.Context, op provider.Operation, inboundMode
 // the router moves on.
 func (r *Router) tryKey(ctx context.Context, st *routerState, res *Result, p *config.Provider, model string, op provider.Operation, body map[string]any, key, keyType string, last **provider.Response) (done, skip bool) {
 	resp, att, oc := r.callOnce(ctx, st, p, model, op, body, key, keyType)
+	return r.settle(ctx, res, p, model, key, keyType, resp, att, oc, last)
+}
+
+// settle records an attempt that did not stream to the client and applies its
+// outcome: success fills res, the others decide blackout and what comes next.
+func (r *Router) settle(ctx context.Context, res *Result, p *config.Provider, model, key, keyType string, resp *provider.Response, att Attempt, oc outcome, last **provider.Response) (done, skip bool) {
 	res.Attempts = append(res.Attempts, att)
 	notifyAttempt(ctx, att)
 	// Incompatible responses have HTTPStatus 0 and an empty body — they must
@@ -316,6 +346,13 @@ func (r *Router) callOnce(ctx context.Context, st *routerState, p *config.Provid
 		Provider: p.Name, Signatures: r.signatures,
 	})
 	att.LatencyMS = time.Since(start).Milliseconds()
+	att, oc := r.judge(ctx, st, p, model, op, key, resp, err, att)
+	return resp, att, oc
+}
+
+// judge classifies a finished buffered call: canceled, incompatible,
+// prohibited, provider error, bad output or success.
+func (r *Router) judge(ctx context.Context, st *routerState, p *config.Provider, model string, op provider.Operation, key string, resp *provider.Response, err error, att Attempt) (Attempt, outcome) {
 	if resp != nil {
 		att.HTTPStatus = resp.HTTPStatus
 		att.FinishReason = resp.FinishReason
@@ -331,7 +368,7 @@ func (r *Router) callOnce(ctx context.Context, st *routerState, p *config.Provid
 	if ctx.Err() != nil {
 		att.Outcome = "canceled"
 		att.Error = ctx.Err().Error()
-		return resp, att, outcomeCanceled
+		return att, outcomeCanceled
 	}
 
 	// A non-portable Responses body is a property of the request and the
@@ -340,7 +377,7 @@ func (r *Router) callOnce(ctx context.Context, st *routerState, p *config.Provid
 	if resp != nil && resp.Incompatible {
 		att.Outcome = attemptIncompatible
 		att.Error = "responses request not portable to this provider"
-		return resp, att, outcomeIncompatible
+		return att, outcomeIncompatible
 	}
 
 	// A content-policy block is a deterministic output, even when delivered with
@@ -350,7 +387,7 @@ func (r *Router) callOnce(ctx context.Context, st *routerState, p *config.Provid
 		att.Outcome = "prohibited_content"
 		att.Error = "content blocked by provider policy (" + provider.ProhibitedContentMarker + ")"
 		att.Response = string(resp.RawResponse)
-		return resp, att, outcomeProhibited
+		return att, outcomeProhibited
 	}
 
 	if err != nil || resp == nil || !resp.OK() {
@@ -363,13 +400,13 @@ func (r *Router) callOnce(ctx context.Context, st *routerState, p *config.Provid
 		} else if resp != nil {
 			att.Error = fmt.Sprintf("http status %d", resp.HTTPStatus)
 		}
-		return resp, att, outcomeProviderError
+		return att, outcomeProviderError
 	}
 
 	// HTTP succeeded: verify output (#5).
 	if st.outputOK(op, resp) {
 		att.Outcome = "success"
-		return resp, att, outcomeSuccess
+		return att, outcomeSuccess
 	}
 	att.Outcome = "bad_output"
 	att.Error = "output did not finish normally"
@@ -384,7 +421,7 @@ func (r *Router) callOnce(ctx context.Context, st *routerState, p *config.Provid
 	}
 	log.Printf("WARNING: output did not finish normally: provider=%s model=%s key=%s finish_reason=%s%s — moving on without blackout",
 		p.Name, model, maskKey(key), reason, detail)
-	return resp, att, outcomeBadOutput
+	return att, outcomeBadOutput
 }
 
 // outputOK applies output verification: chat responses must have content and a
