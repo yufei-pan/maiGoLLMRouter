@@ -2,6 +2,7 @@ package provider
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -373,5 +374,40 @@ func TestChatToResponsesLengthBecomesIncomplete(t *testing.T) {
 	output, _ := parsed["output"].([]any)
 	if len(output) != 1 {
 		t.Fatalf("output=%v", parsed["output"])
+	}
+}
+
+func TestResponsesToChatMapsInputFile(t *testing.T) {
+	body := map[string]any{
+		"input": []any{map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "input_file", "filename": "a.pdf", "file_data": "data:application/pdf;base64,JVBERi0="},
+			map[string]any{"type": "input_file", "file_url": "https://example.com/b.pdf"},
+		}}},
+	}
+	out, err := ResponsesToChat(body, "m")
+	if err != nil {
+		t.Fatalf("ResponsesToChat: %v", err)
+	}
+	msgs, _ := out["messages"].([]any)
+	user, _ := msgs[0].(map[string]any)
+	want := []any{
+		map[string]any{"type": "file", "file": map[string]any{
+			"filename": "a.pdf", "file_data": "data:application/pdf;base64,JVBERi0=",
+		}},
+		map[string]any{"type": "file", "file": map[string]any{"file_url": "https://example.com/b.pdf"}},
+	}
+	if !reflect.DeepEqual(user["content"], want) {
+		t.Fatalf("content=%v", user["content"])
+	}
+}
+
+func TestPortableForChatRejectsInputFileByID(t *testing.T) {
+	body := map[string]any{
+		"input": []any{map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "input_file", "file_id": "file-abc"},
+		}}},
+	}
+	if err := PortableForChat(body); err == nil {
+		t.Fatal("expected file_id-only input_file to be non-portable")
 	}
 }

@@ -155,6 +155,12 @@ func portableContent(raw any, i int) error {
 			switch typ {
 			case "input_text", "output_text", "text", "input_image", "image_url":
 				// ok
+			case "input_file":
+				// A file_id points into the downstream OpenAI file store, which no
+				// other dialect can read; only inline data or a URL travels.
+				if asString(pm, "file_data") == "" && asString(pm, "file_url") == "" {
+					return fmt.Errorf("input[%d].content[%d]: input_file needs file_data or file_url to be portable for chat", i, j)
+				}
 			default:
 				return fmt.Errorf("input[%d].content[%d]: type %q is not portable for chat", i, j, typ)
 			}
@@ -373,6 +379,14 @@ func responsesContentToChat(raw any) (any, error) {
 					img = map[string]any{"url": s}
 				}
 				parts = append(parts, map[string]any{"type": "image_url", "image_url": img})
+			case "input_file":
+				file := map[string]any{}
+				for _, k := range []string{"file_data", "file_url", "filename"} {
+					if v := asString(pm, k); v != "" {
+						file[k] = v
+					}
+				}
+				parts = append(parts, map[string]any{"type": "file", "file": file})
 			default:
 				return nil, fmt.Errorf("content part type %q not portable", typ)
 			}

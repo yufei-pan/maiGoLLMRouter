@@ -114,6 +114,14 @@ input items, and no `previous_response_id`. `instructions` becomes a leading
 system message; `reasoning`, `include`, and `truncation` are dropped. A
 non-portable request skips that target and falls through to the next one.
 
+`input_file` parts are portable when they carry `file_data` (a data URL, or raw
+base64 typed by `filename`) or `file_url`; a bare `file_id` is not, since it
+names a file in the OpenAI file store. They become Chat `file` parts, which
+Gemini receives as `inlineData`/`fileData` and Anthropic as `document` blocks
+(PDF as base64, `text/*` as plain text, URLs as a `url` source, `filename` as
+the title; image files become `image` blocks). Chat Completions requests with
+`file` parts get the same mapping.
+
 ## Configuration
 
 See `[config.example.toml](config.example.toml)` for a fully commented example.

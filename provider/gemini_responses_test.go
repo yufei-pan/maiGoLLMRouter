@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -361,5 +362,44 @@ func TestResponsesViaGeminiFunctionCallFollowup(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"lookup"`) {
 		t.Fatalf("function name missing: %s", raw)
+	}
+}
+
+func TestResponsesViaGeminiPassesInputFile(t *testing.T) {
+	var outbound map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&outbound)
+		fmt.Fprint(w, `{"candidates":[{"content":{"parts":[{"text":"ok"}],"role":"model"},"finishReason":"STOP"}]}`)
+	}))
+	defer srv.Close()
+
+	resp, err := Call(context.Background(), srv.Client(), "gemini", srv.URL, "k", Request{
+		Op: OpResponses, Model: "gemini-2.5-flash",
+		Body: map[string]any{"input": []any{map[string]any{
+			"role": "user",
+			"content": []any{
+				map[string]any{"type": "input_text", "text": "summarize"},
+				map[string]any{"type": "input_file", "filename": "a.pdf", "file_data": "data:application/pdf;base64,JVBERi0="},
+				// Raw base64 without a data URL: the type comes from the filename.
+				map[string]any{"type": "input_file", "filename": "scan.png", "file_data": "iVBORw=="},
+				map[string]any{"type": "input_file", "file_url": "https://example.com/docs/b.pdf?sig=x"},
+			},
+		}}},
+	})
+	if err != nil || !resp.OK() {
+		t.Fatalf("err=%v resp=%+v", err, resp)
+	}
+
+	contents, _ := outbound["contents"].([]any)
+	user, _ := contents[0].(map[string]any)
+	want := []any{
+		map[string]any{"text": "summarize"},
+		map[string]any{"inlineData": map[string]any{"mimeType": "application/pdf", "data": "JVBERi0="}},
+		map[string]any{"inlineData": map[string]any{"mimeType": "image/png", "data": "iVBORw=="}},
+		map[string]any{"fileData": map[string]any{"fileUri": "https://example.com/docs/b.pdf?sig=x", "mimeType": "application/pdf"}},
+	}
+	if !reflect.DeepEqual(user["parts"], want) {
+		raw, _ := json.Marshal(user["parts"])
+		t.Fatalf("parts=%s", raw)
 	}
 }

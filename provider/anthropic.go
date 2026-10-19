@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -147,6 +148,10 @@ func anthropicUserContent(content any) any {
 			if block := anthropicImageBlock(p["image_url"]); block != nil {
 				out = append(out, block)
 			}
+		case "file":
+			if block := anthropicFileBlock(p["file"]); block != nil {
+				out = append(out, block)
+			}
 		}
 	}
 	if len(out) == 0 {
@@ -180,6 +185,32 @@ func anthropicImageBlock(imageURL any) map[string]any {
 			"url":  url,
 		},
 	}
+}
+
+// anthropicFileBlock turns an OpenAI file part into a document block (or an
+// image block for image files). The filename becomes the document title.
+func anthropicFileBlock(file any) map[string]any {
+	f, ok := parseFilePart(file)
+	if !ok {
+		return nil
+	}
+	source := map[string]any{"type": "base64", "media_type": f.MediaType, "data": f.Data}
+	switch {
+	case f.Data == "":
+		source = map[string]any{"type": "url", "url": f.URL}
+	case strings.HasPrefix(f.MediaType, "image/"):
+		return map[string]any{"type": "image", "source": source}
+	case strings.HasPrefix(f.MediaType, "text/"):
+		// Anthropic takes plain-text documents as text, not base64.
+		if text, err := base64.StdEncoding.DecodeString(f.Data); err == nil {
+			source = map[string]any{"type": "text", "media_type": "text/plain", "data": string(text)}
+		}
+	}
+	block := map[string]any{"type": "document", "source": source}
+	if f.Filename != "" {
+		block["title"] = f.Filename
+	}
+	return block
 }
 
 func anthropicAssistantContent(mm map[string]any) any {
