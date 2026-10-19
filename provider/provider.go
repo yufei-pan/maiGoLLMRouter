@@ -103,6 +103,8 @@ func CallStream(ctx context.Context, client *http.Client, kind, baseURL, apiKey 
 	switch {
 	case kind == "openai" && req.Op == OpChat:
 		stream, resp, err = openAIChatStream(ctx, client, baseURL, apiKey, timeout, req, WantsUsage(req.Body))
+	case kind == "openai" && req.Op == OpResponses:
+		stream, resp, err = openAIResponsesStream(ctx, client, baseURL, apiKey, timeout, req)
 	default:
 		if timeout > 0 {
 			var cancel context.CancelFunc
