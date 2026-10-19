@@ -264,6 +264,7 @@ annai is built in another session (`~/work/annai`). These are not router work:
 - **Speech format:** ask for `response_format: "opus"` (Ogg Opus) where the browser plays it, i.e. Safari 18.4 and later and other modern browsers; elsewhere ask for `mp3` or `aac`.
 - **Speech model:** use the router's speech route as the model id (e.g. `shiori-voice`). The voice can be left empty when the route sets one per target.
 - **Recordings may be compressed:** the router passes Ogg, MP3 and M4A/MP4 through, and converts what a target can't read. Safari's `MediaRecorder` records MP4/AAC, not Ogg.
+- **Send the transcription `language`** once annai's language support (a planned feature) lands. stepfun assumes English when it isn't given, and returns a wrong transcript of Chinese or Japanese that still counts as a success. Gemini and Whisper detect the language themselves, so until then a transcription route should try them before stepfun.
 
 ## Left to the builder
 
