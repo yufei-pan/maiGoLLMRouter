@@ -285,3 +285,36 @@ func TestChatToResponsesKeepsThoughtSignature(t *testing.T) {
 		t.Errorf("final item = %v, want thought_signature sig1", item)
 	}
 }
+
+// TestChatToResponsesTextMidCallKeepsArguments verifies text arriving between
+// two fragments of a tool call's arguments neither closes the call early nor
+// drops a fragment, and the final output follows the streamed order.
+func TestChatToResponsesTextMidCallKeepsArguments(t *testing.T) {
+	inner := cannedChatStream(nil,
+		`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c0","type":"function","function":{"name":"speak","arguments":"{\"te"}}]}}]}`,
+		`{"choices":[{"index":0,"delta":{"content":"\n"}}]}`,
+		`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"xt\":\"a\"}"}}]}}]}`,
+		`{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+		"[DONE]")
+	evs, err := drainResponses(t, chatToResponses(inner, "real"))
+	if err != nil {
+		t.Fatalf("stream failed: %v", err)
+	}
+	deltas := 0
+	var callDone map[string]any
+	for _, e := range evs {
+		if e.m["type"] == "response.function_call_arguments.delta" {
+			deltas++
+		}
+		if item, _ := e.m["item"].(map[string]any); e.m["type"] == "response.output_item.done" && item["type"] == "function_call" {
+			callDone = item
+		}
+	}
+	if deltas != 2 || callDone == nil || callDone["arguments"] != `{"text":"a"}` {
+		t.Fatalf("argument deltas = %d, call done = %v", deltas, callDone)
+	}
+	out, _ := finalResponse(t, evs)["output"].([]any)
+	if first, _ := out[0].(map[string]any); first["type"] != "function_call" {
+		t.Errorf("final output order = %v, want the call first, as streamed", out)
+	}
+}

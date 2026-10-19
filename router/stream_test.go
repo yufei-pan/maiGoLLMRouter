@@ -415,3 +415,73 @@ func TestStreamErrorsDoNotLeakProviderAddress(t *testing.T) {
 		t.Errorf("error frame leaks the provider address: %s", last)
 	}
 }
+
+// TestStreamCanceledBeforeCommit verifies a caller that goes away while the
+// provider has sent no output stops the run at once: nothing is committed,
+// nothing blacked out, no other key tried.
+func TestStreamCanceledBeforeCommit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if bearer(r) == "f1" {
+			t.Error("no other key should be tried after the caller went away")
+		}
+		writeSSE(w, sRole)
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	r := streamCfg(t, srv.URL, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+	done := make(chan *Result, 1)
+	go func() { done <- r.ExecuteStream(ctx, provider.OpChat, "m", streamReq(), &recordingSink{}) }()
+	var res *Result
+	select {
+	case res = <-done:
+	case <-time.After(time.Second):
+		t.Fatal("the run did not stop when the caller went away")
+	}
+	if res.Committed || len(res.Attempts) != 1 || res.Attempts[0].Outcome != "canceled" {
+		t.Fatalf("committed=%v attempts=%+v", res.Committed, res.Attempts)
+	}
+	if r.blackout.Blocked("n1", "real-model") {
+		t.Error("a caller going away must not black out the key")
+	}
+}
+
+// cancelAfterFirstWrite cancels the request once the first frame went out.
+type cancelAfterFirstWrite struct {
+	recordingSink
+	cancel context.CancelFunc
+}
+
+func (s *cancelAfterFirstWrite) Write(f provider.Frame) error {
+	err := s.recordingSink.Write(f)
+	s.cancel()
+	return err
+}
+
+// TestStreamCanceledAfterCommit verifies a caller that goes away while the
+// router waits for the next piece stops the stream at once, without blackout.
+func TestStreamCanceledAfterCommit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, sContent)
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	r := streamCfg(t, srv.URL, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	sink := &cancelAfterFirstWrite{cancel: cancel}
+	done := make(chan *Result, 1)
+	go func() { done <- r.ExecuteStream(ctx, provider.OpChat, "m", streamReq(), sink) }()
+	var res *Result
+	select {
+	case res = <-done:
+	case <-time.After(time.Second):
+		t.Fatal("the stream did not stop when the caller went away")
+	}
+	if !res.Committed || len(res.Attempts) != 1 || res.Attempts[0].Outcome != "canceled" {
+		t.Fatalf("committed=%v attempts=%+v", res.Committed, res.Attempts)
+	}
+	if r.blackout.Blocked("n1", "real-model") {
+		t.Error("a caller going away must not black out the key")
+	}
+}

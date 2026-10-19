@@ -93,11 +93,20 @@ func chunkBase(id string, created any, model string) map[string]any {
 }
 
 func withChoice(base map[string]any, index int, delta map[string]any, finish any) map[string]any {
+	return withChoiceExtra(base, index, delta, finish, nil)
+}
+
+// withChoiceExtra is withChoice with more fields on the choice (logprobs).
+func withChoiceExtra(base map[string]any, index int, delta map[string]any, finish any, extra map[string]any) map[string]any {
 	c := make(map[string]any, len(base)+1)
 	for k, v := range base {
 		c[k] = v
 	}
-	c["choices"] = []any{map[string]any{"index": index, "delta": delta, "finish_reason": finish}}
+	choice := map[string]any{"index": index, "delta": delta, "finish_reason": finish}
+	for k, v := range extra {
+		choice[k] = v
+	}
+	c["choices"] = []any{choice}
 	return c
 }
 
@@ -114,8 +123,12 @@ func bufferedChatFrames(body []byte, wantsUsage bool) []Frame {
 			Message struct {
 				Content          any              `json:"content"`
 				ReasoningContent string           `json:"reasoning_content"`
+				Reasoning        string           `json:"reasoning"`
+				Refusal          string           `json:"refusal"`
+				Annotations      []any            `json:"annotations"`
 				ToolCalls        []map[string]any `json:"tool_calls"`
 			} `json:"message"`
+			Logprobs     any `json:"logprobs"`
 			FinishReason any `json:"finish_reason"`
 		} `json:"choices"`
 		Usage map[string]any `json:"usage"`
@@ -126,11 +139,25 @@ func bufferedChatFrames(body []byte, wantsUsage bool) []Frame {
 	add := func(m map[string]any) { frames = append(frames, Frame{Data: mustJSON(m)}) }
 	for _, ch := range c.Choices {
 		add(withChoice(base, ch.Index, map[string]any{"role": "assistant", "content": ""}, nil))
-		if ch.Message.ReasoningContent != "" {
+		switch {
+		case ch.Message.ReasoningContent != "":
 			add(withChoice(base, ch.Index, map[string]any{"reasoning_content": ch.Message.ReasoningContent}, nil))
+		case ch.Message.Reasoning != "":
+			add(withChoice(base, ch.Index, map[string]any{"reasoning": ch.Message.Reasoning}, nil))
 		}
 		if text := contentToText(ch.Message.Content); text != "" {
-			add(withChoice(base, ch.Index, map[string]any{"content": text}, nil))
+			delta := map[string]any{"content": text}
+			if len(ch.Message.Annotations) > 0 {
+				delta["annotations"] = ch.Message.Annotations
+			}
+			var extra map[string]any
+			if ch.Logprobs != nil {
+				extra = map[string]any{"logprobs": ch.Logprobs}
+			}
+			add(withChoiceExtra(base, ch.Index, delta, nil, extra))
+		}
+		if ch.Message.Refusal != "" {
+			add(withChoice(base, ch.Index, map[string]any{"refusal": ch.Message.Refusal}, nil))
 		}
 		for i, tc := range ch.Message.ToolCalls {
 			delta := make(map[string]any, len(tc)+1)
@@ -176,22 +203,29 @@ func bufferedResponsesFrames(body []byte) ([]Frame, *responsesEmitter) {
 		}
 		id, _ := item["id"].(string)
 		switch item["type"] {
-		case "reasoning":
-			if text := responsesSummaryText(item); text != "" {
-				frames = append(frames, em.closeAll()...)
-				em.nextID = id
+		case "reasoning", "message":
+			text := responsesSummaryText(item)
+			if item["type"] == "message" {
+				text = responsesMessageText(item)
+			}
+			frames = append(frames, em.closeAll()...)
+			em.nextID = id
+			if text == "" {
+				// Nothing to stream (encrypted reasoning only): send the item whole.
+				frames = append(frames, em.item(item)...)
+				continue
+			}
+			if item["type"] == "message" {
+				frames = append(frames, em.text(text)...)
+			} else {
 				frames = append(frames, em.reasoning(text)...)
 			}
-		case "message":
-			if text := responsesMessageText(item); text != "" {
-				frames = append(frames, em.closeAll()...)
-				em.nextID = id
-				frames = append(frames, em.text(text)...)
-			}
+			em.current.raw = item
 		case "function_call":
 			em.nextID = id
 			frames = append(frames, em.toolCall(i, asString(item, "call_id"), asString(item, "name"),
 				asString(item, "arguments"), thoughtSignatureFrom(item))...)
+			em.calls[i].raw = item
 		default:
 			em.nextID = id
 			frames = append(frames, em.item(item)...)

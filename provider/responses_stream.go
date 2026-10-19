@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"sort"
 	"strings"
 	"time"
 )
@@ -29,7 +30,8 @@ type emittedItem struct {
 	text      strings.Builder // message text, reasoning summary, or call arguments
 	callID    string
 	name      string
-	signature string // a Gemini thought signature carried on the call
+	signature string         // a Gemini thought signature carried on the call
+	raw       map[string]any // when set, the done event carries this original item
 	closed    bool
 }
 
@@ -91,11 +93,23 @@ func (e *responsesEmitter) closeAll() []Frame {
 	return out
 }
 
+// closeCurrent closes the open message or reasoning item. Tool calls stay open
+// until finish: a provider may write text between two pieces of a call's
+// arguments, and closing the call there would cut them short.
+func (e *responsesEmitter) closeCurrent() []Frame {
+	if e.current == nil {
+		return nil
+	}
+	out := e.closeItem(e.current)
+	e.current = nil
+	return out
+}
+
 // reasoning adds to the open reasoning summary, opening one if needed.
 func (e *responsesEmitter) reasoning(delta string) []Frame {
 	var out []Frame
 	if e.current == nil || e.current.kind != "reasoning" {
-		out = append(out, e.closeAll()...)
+		out = append(out, e.closeCurrent()...)
 		it := e.open("reasoning", "rs_")
 		e.current = it
 		out = append(out,
@@ -118,7 +132,7 @@ func (e *responsesEmitter) reasoning(delta string) []Frame {
 func (e *responsesEmitter) text(delta string) []Frame {
 	var out []Frame
 	if e.current == nil || e.current.kind != "message" {
-		out = append(out, e.closeAll()...)
+		out = append(out, e.closeCurrent()...)
 		it := e.open("message", "msg_")
 		e.current = it
 		out = append(out,
@@ -192,6 +206,31 @@ func (e *responsesEmitter) closeItem(it *emittedItem) []Frame {
 		return nil
 	}
 	it.closed = true
+	out := e.closeEvents(it)
+	if it.raw != nil {
+		// A finished item from the provider: its done event is the item itself,
+		// with everything the synthesized one would drop (encrypted reasoning,
+		// citations).
+		if _, ok := it.raw["id"]; !ok {
+			it.raw["id"] = it.id
+		}
+		last := len(out) - 1
+		out[last] = e.reissue(out[last], map[string]any{"output_index": it.index, "item": it.raw})
+	}
+	return out
+}
+
+// reissue replaces a frame's payload, keeping its type and sequence_number.
+func (e *responsesEmitter) reissue(f Frame, fields map[string]any) Frame {
+	var old map[string]any
+	_ = json.Unmarshal(f.Data, &old)
+	fields["type"] = old["type"]
+	fields["sequence_number"] = old["sequence_number"]
+	return Frame{Event: f.Event, Data: mustJSON(fields)}
+}
+
+// closeEvents are the events that finish an item, ending with output_item.done.
+func (e *responsesEmitter) closeEvents(it *emittedItem) []Frame {
 	text := it.text.String()
 	switch it.kind {
 	case "reasoning":
@@ -256,12 +295,15 @@ func (e *responsesEmitter) finish(final map[string]any) []Frame {
 	return append(out, e.event(typ, map[string]any{"response": final}))
 }
 
-// stampIDs gives final's output items the ids their streamed items had:
-// function calls by call_id, messages and reasoning in order of appearance.
+// stampIDs gives final's output items the ids their streamed items had
+// (function calls by call_id, messages and reasoning in order of appearance)
+// and puts them in the order they were streamed.
 func (e *responsesEmitter) stampIDs(final map[string]any) {
 	output, _ := final["output"].([]any)
 	used := make(map[*emittedItem]bool)
-	for _, raw := range output {
+	order := make(map[int]int, len(output)) // position in output -> streamed output_index
+	for i, raw := range output {
+		order[i] = len(e.items) + i // not streamed: after the rest, in their own order
 		item, ok := raw.(map[string]any)
 		if !ok {
 			continue
@@ -276,8 +318,21 @@ func (e *responsesEmitter) stampIDs(final map[string]any) {
 			}
 			used[it] = true
 			item["id"] = it.id
+			order[i] = it.index
 			break
 		}
+	}
+	idx := make([]int, len(output))
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.SliceStable(idx, func(a, b int) bool { return order[idx[a]] < order[idx[b]] })
+	sorted := make([]any, len(output))
+	for i, j := range idx {
+		sorted[i] = output[j]
+	}
+	if output != nil {
+		final["output"] = sorted
 	}
 }
 

@@ -136,3 +136,63 @@ func TestBufferedResponsesStreamClosesEveryItem(t *testing.T) {
 		t.Errorf("items added %d, done %d; want 3 and 3 (types %v)", added, done, eventTypes(evs))
 	}
 }
+
+// TestBufferedResponsesKeepsItems verifies each item's done event carries the
+// original item: encrypted reasoning (even with no summary) and citations.
+func TestBufferedResponsesKeepsItems(t *testing.T) {
+	body := `{"id":"r1","object":"response","created_at":1,"status":"completed","model":"real","output":[` +
+		`{"id":"rs0","type":"reasoning","summary":[],"encrypted_content":"ENC0"},` +
+		`{"id":"rs1","type":"reasoning","summary":[{"type":"summary_text","text":"think"}],"encrypted_content":"ENC1"},` +
+		`{"id":"m1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Hi","annotations":[{"type":"url_citation","url":"https://x.example","title":"X"}]}]}]}`
+	resp := &Response{HTTPStatus: 200, OpenAIBody: []byte(body), FinishReason: "stop", HasContent: true}
+	evs, err := drainResponses(t, BufferedStream(OpResponses, resp, false))
+	if err != nil {
+		t.Fatalf("stream failed: %v", err)
+	}
+	done := map[string]map[string]any{}
+	for _, e := range evs {
+		if item, _ := e.m["item"].(map[string]any); e.m["type"] == "response.output_item.done" {
+			done[item["id"].(string)] = item
+		}
+	}
+	if done["rs0"]["encrypted_content"] != "ENC0" {
+		t.Errorf("summary-less reasoning item = %v, want it sent with encrypted_content", done["rs0"])
+	}
+	if done["rs1"]["encrypted_content"] != "ENC1" {
+		t.Errorf("reasoning item = %v, want encrypted_content kept", done["rs1"])
+	}
+	content, _ := done["m1"]["content"].([]any)
+	part, _ := content[0].(map[string]any)
+	if anns, _ := part["annotations"].([]any); len(anns) != 1 {
+		t.Errorf("message item = %v, want its citation kept", done["m1"])
+	}
+}
+
+// TestBufferedChatKeepsReasoningAnnotationsLogprobs verifies the fields annai
+// reads from chunks survive a buffered reply: reasoning (OpenRouter's name),
+// citations and the first token's logprobs.
+func TestBufferedChatKeepsReasoningAnnotationsLogprobs(t *testing.T) {
+	body := `{"id":"c","object":"chat.completion","created":1,"model":"real","choices":[{"index":0,` +
+		`"message":{"role":"assistant","content":"Hi","reasoning":"thinking","annotations":[{"type":"url_citation","url_citation":{"url":"https://x.example","title":"X"}}]},` +
+		`"logprobs":{"content":[{"token":"Hi","logprob":-0.1,"top_logprobs":[]}]},"finish_reason":"stop"}]}`
+	resp := &Response{HTTPStatus: 200, OpenAIBody: []byte(body), FinishReason: "stop", HasContent: true}
+	frames, err := drain(t, BufferedStream(OpChat, resp, false))
+	if err != nil {
+		t.Fatalf("stream failed: %v", err)
+	}
+	var reasoning, annotations, logprobs bool
+	for _, f := range frames[:len(frames)-1] {
+		m := frameJSON(t, f)
+		choices, _ := m["choices"].([]any)
+		for _, c := range choices {
+			ch, _ := c.(map[string]any)
+			d, _ := ch["delta"].(map[string]any)
+			reasoning = reasoning || d["reasoning"] == "thinking" || d["reasoning_content"] == "thinking"
+			annotations = annotations || d["annotations"] != nil
+			logprobs = logprobs || ch["logprobs"] != nil
+		}
+	}
+	if !reasoning || !annotations || !logprobs {
+		t.Errorf("reasoning=%v annotations=%v logprobs=%v, want all kept", reasoning, annotations, logprobs)
+	}
+}
