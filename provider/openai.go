@@ -6,10 +6,11 @@ import (
 	"net/http"
 )
 
-// callOpenAI handles the OpenAI dialect, which is a near pass-through: the
-// inbound body is forwarded with the model name overridden. Streaming controls
-// are stripped because the router buffers and verifies complete JSON responses.
-// Responses requests take the /responses route described by callOpenAIResponses.
+// callOpenAI handles the OpenAI dialect on the buffered path, a near
+// pass-through: the inbound body is forwarded with the model name overridden
+// and the streaming controls stripped, so the reply is one JSON body the router
+// can verify. Streamed requests go through openAIChatStream instead. Responses
+// requests take the /responses route described by callOpenAIResponses.
 func callOpenAI(ctx context.Context, client *http.Client, baseURL, apiKey string, req Request) (*Response, error) {
 	if req.Op == OpResponses {
 		return callOpenAIResponses(ctx, client, baseURL, apiKey, req)
@@ -99,8 +100,8 @@ func openAIResponsesViaChat(ctx context.Context, client *http.Client, baseURL, a
 	return resp, nil
 }
 
-// openAIOutboundBody copies the inbound body, drops the streaming controls the
-// router cannot buffer, and pins the resolved downstream model name.
+// openAIOutboundBody copies the inbound body for the buffered path, drops the
+// streaming controls, and pins the resolved downstream model name.
 func openAIOutboundBody(req Request) map[string]any {
 	body := make(map[string]any, len(req.Body)+1)
 	for k, v := range req.Body {

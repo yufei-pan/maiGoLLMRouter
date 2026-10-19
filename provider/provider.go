@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // Operation distinguishes the supported request kinds.
@@ -85,6 +86,36 @@ func Call(ctx context.Context, client *http.Client, kind, baseURL, apiKey string
 		resp.Prohibited = true
 	}
 	return resp, err
+}
+
+// CallStream opens a streamed call. It returns a *Stream when the downstream
+// answered 2xx with text/event-stream. Otherwise it returns a *Response to be
+// judged exactly like Call's: a non-2xx reply, an incompatible body, a 2xx JSON
+// reply (decoded as today), or a dialect that is not streamed (which just goes
+// through Call, with timeout as its whole-request limit). err is as Call's.
+//
+// For a stream, timeout limits the wait for the first output and then the
+// longest silence between reads; client must have no Timeout of its own.
+func CallStream(ctx context.Context, client *http.Client, kind, baseURL, apiKey string, timeout time.Duration, req Request) (*Stream, *Response, error) {
+	var stream *Stream
+	var resp *Response
+	var err error
+	switch {
+	case kind == "openai" && req.Op == OpChat:
+		stream, resp, err = openAIChatStream(ctx, client, baseURL, apiKey, timeout, req, WantsUsage(req.Body))
+	default:
+		if timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, timeout)
+			defer cancel()
+		}
+		resp, err = Call(ctx, client, kind, baseURL, apiKey, req)
+		return nil, resp, err
+	}
+	if resp != nil && isProhibitedContent(resp.RawResponse) {
+		resp.Prohibited = true
+	}
+	return stream, resp, err
 }
 
 // callResponsesViaChat serves OpResponses for non-OpenAI dialects by translating
