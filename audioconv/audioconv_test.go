@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"math"
+	"os"
 	"os/exec"
 	"testing"
 	"time"
@@ -119,5 +120,52 @@ func TestConvertStopsWhenCanceled(t *testing.T) {
 	}
 	if d := time.Since(start); d > 2*time.Second {
 		t.Errorf("took %v to stop", d)
+	}
+}
+
+// TestConvertRefusesPlaylists verifies untrusted input can't make ffmpeg open
+// anything but the audio it was handed: a playlist naming a local file fails
+// instead of converting that file.
+func TestConvertRefusesPlaylists(t *testing.T) {
+	ffmpeg := needFFmpeg(t)
+	dir := t.TempDir()
+	secret := dir + "/secret.wav"
+	if err := os.WriteFile(secret, WrapPCM(sine(1), 24000), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir) // ffmpeg runs in the router's working directory: relative names resolve there
+	for name, input := range map[string]string{
+		"hls":             "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nfile://" + secret + "\n#EXT-X-ENDLIST\n",
+		"hls relative":    "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nsecret.wav\n#EXT-X-ENDLIST\n",
+		"concat":          "ffconcat version 1.0\nfile '" + secret + "'\n",
+		"concat relative": "ffconcat version 1.0\nfile 'secret.wav'\n",
+	} {
+		if out, _, err := Convert(context.Background(), ffmpeg, []byte(input), "audio/wav", "opus"); err == nil {
+			t.Errorf("%s: converted %d bytes from a file it was never given", name, len(out))
+		}
+	}
+}
+
+// TestConvertAcceptsAudioContainers verifies the input whitelist still lets
+// every audio container a client may record in through.
+func TestConvertAcceptsAudioContainers(t *testing.T) {
+	ffmpeg := needFFmpeg(t)
+	dir := t.TempDir()
+	for _, c := range []struct{ muxer, ct string }{
+		{"ogg", "audio/ogg"}, {"webm", "audio/webm"}, {"mp3", "audio/mpeg"},
+		{"flac", "audio/flac"}, {"adts", "audio/aac"}, {"mp4", "audio/mp4"},
+	} {
+		path := dir + "/clip." + c.muxer
+		args := []string{"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-ac", "1"}
+		if c.muxer == "mp4" {
+			args = append(args, "-c:a", "aac")
+		}
+		if out, err := exec.Command(ffmpeg, append(args, "-f", c.muxer, "-y", path)...).CombinedOutput(); err != nil {
+			t.Fatalf("making a %s clip: %v %s", c.muxer, err, out)
+		}
+		in, _ := os.ReadFile(path)
+		if _, ct, err := Convert(context.Background(), ffmpeg, in, c.ct, "opus"); err != nil || ct != "audio/ogg" {
+			t.Errorf("%s: %v", c.muxer, err)
+		}
 	}
 }

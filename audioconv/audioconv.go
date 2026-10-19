@@ -35,6 +35,9 @@ var encodings = map[string]encoding{
 	"pcm":  {[]string{"-f", "s16le", "-ar", strconv.Itoa(DefaultPCMRate), "-ac", "1"}, "audio/pcm"},
 }
 
+// inputFormats are the ffmpeg demuxers audio may arrive in.
+const inputFormats = "wav,ogg,mp3,flac,aac,matroska,webm,mov,mp4,m4a,s16le"
+
 // ContentTypeFor is the content type of a speech format, or "" for an unknown one.
 func ContentTypeFor(format string) string {
 	return encodings[format].contentType
@@ -112,7 +115,11 @@ func Convert(ctx context.Context, ffmpeg string, data []byte, contentType, forma
 	if !ok {
 		return nil, "", fmt.Errorf("unknown speech format %q", format)
 	}
-	args := []string{"-hide_banner", "-loglevel", "error"}
+	// The input may come from a client: ffmpeg may read nothing but the pipe it
+	// is handed, and only as an audio container, never a playlist or a list
+	// of other files.
+	args := []string{"-hide_banner", "-loglevel", "error",
+		"-protocol_whitelist", "pipe", "-format_whitelist", inputFormats}
 	if IsRawPCM(contentType) {
 		args = append(args, "-f", "s16le", "-ar", strconv.Itoa(PCMRate(contentType)), "-ac", "1")
 	}
