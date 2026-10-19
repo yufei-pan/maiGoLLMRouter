@@ -20,8 +20,9 @@ import (
 // Router holds the current routing state and the key blackout, which outlives
 // config reloads.
 type Router struct {
-	state    atomic.Pointer[routerState]
-	blackout *Blackout
+	state      atomic.Pointer[routerState]
+	blackout   *Blackout
+	signatures *provider.SignatureCache // Gemini thought signatures; outlives reloads too
 }
 
 // routerState is one configuration's view of the downstreams: the config, its
@@ -48,7 +49,10 @@ func newRouterState(cfg *config.Config) *routerState {
 
 // New builds a Router from the resolved configuration.
 func New(cfg *config.Config) *Router {
-	r := &Router{blackout: NewBlackout(cfg.Server.GlobalBlackout)}
+	r := &Router{
+		blackout:   NewBlackout(cfg.Server.GlobalBlackout),
+		signatures: provider.NewSignatureCache(4096, 24*time.Hour),
+	}
 	r.state.Store(newRouterState(cfg))
 	return r
 }
@@ -309,6 +313,7 @@ func (r *Router) callOnce(ctx context.Context, st *routerState, p *config.Provid
 	start := time.Now()
 	resp, err := provider.Call(ctx, st.clients[p.Name], p.Kind, p.BaseURL, key, provider.Request{
 		Op: op, Model: model, Body: body, ResponsesMode: st.responsesMode(p, op),
+		Provider: p.Name, Signatures: r.signatures,
 	})
 	att.LatencyMS = time.Since(start).Milliseconds()
 	if resp != nil {

@@ -68,6 +68,7 @@ func geminiChat(ctx context.Context, client *http.Client, baseURL, apiKey string
 		return resp, nil
 	}
 	openAIBody, finish, hasContent := geminiToOpenAIChat(raw, req.Model)
+	rememberGeminiSignatures(openAIBody, req)
 	resp.OpenAIBody = openAIBody
 	resp.FinishReason = finish
 	resp.HasContent = hasContent
@@ -97,7 +98,7 @@ func buildGeminiChatBody(req Request) map[string]any {
 			if text != "" {
 				parts = append(parts, map[string]any{"text": text})
 			}
-			parts = append(parts, assistantToolCallParts(mm["tool_calls"])...)
+			parts = append(parts, assistantToolCallParts(mm["tool_calls"], req)...)
 			if len(parts) == 0 {
 				parts = append(parts, map[string]any{"text": ""})
 			}
@@ -336,8 +337,10 @@ func applyGeminiResponseFormat(genCfg map[string]any, rf any) {
 }
 
 // assistantToolCallParts converts an assistant message's tool_calls into Gemini
-// functionCall parts.
-func assistantToolCallParts(v any) []map[string]any {
+// functionCall parts. A call keeps the client's own thought signature, or gets
+// the one the router remembers for it from the same model; failing both, the
+// first call of a Gemini model's turn gets the placeholder Gemini 3 accepts.
+func assistantToolCallParts(v any, req Request) []map[string]any {
 	tcs, ok := v.([]any)
 	if !ok {
 		return nil
@@ -360,7 +363,14 @@ func assistantToolCallParts(v any) []map[string]any {
 			"name": asString(fn, "name"),
 			"args": args,
 		}}
-		if sig := thoughtSignatureFrom(tcm); sig != "" {
+		sig := thoughtSignatureFrom(tcm)
+		if sig == "" {
+			sig = req.Signatures.Get(asString(tcm, "id"), req.signer())
+		}
+		if sig == "" && len(parts) == 0 && isGeminiModel(req.Model) {
+			sig = geminiPlaceholderSignature
+		}
+		if sig != "" {
 			part["thoughtSignature"] = sig
 		}
 		parts = append(parts, part)

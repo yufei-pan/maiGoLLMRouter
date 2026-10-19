@@ -40,6 +40,13 @@ type Request struct {
 	Model         string         // downstream model name (overrides inbound "model")
 	Body          map[string]any // full inbound JSON body (enables passthrough of extras)
 	ResponsesMode ResponsesMode  // OpResponses only; meaningful for kind "openai"
+	Provider      string         // provider name; with Model, names who signed a Gemini tool call
+	Signatures    *SignatureCache
+}
+
+// signer names the provider/model that writes this request's reply.
+func (r Request) signer() string {
+	return r.Provider + "/" + r.Model
 }
 
 // Response is the normalized outcome of a downstream call.
@@ -130,7 +137,8 @@ func callResponsesViaChat(ctx context.Context, client *http.Client, kind, baseUR
 	if err != nil {
 		return &Response{Incompatible: true}, nil
 	}
-	chatReq := Request{Op: OpChat, Model: req.Model, Body: chatBody}
+	chatReq := req
+	chatReq.Op, chatReq.Body = OpChat, chatBody
 	var resp *Response
 	switch kind {
 	case "anthropic":

@@ -32,9 +32,9 @@ func (c *cannedChat) next() (Frame, error) {
 	}
 	return Frame{Data: []byte(d)}, nil
 }
-func (c *cannedChat) state() StreamState                   { return c.acc.state() }
+func (c *cannedChat) state() StreamState                    { return c.acc.state() }
 func (c *cannedChat) errorFrame(status int, m string) Frame { return chatErrorFrame(status, m) }
-func (c *cannedChat) close()                               {}
+func (c *cannedChat) close()                                {}
 
 func cannedChatStream(end error, data ...string) *Stream {
 	return &Stream{HTTPStatus: 200, src: &cannedChat{data: data, end: end, acc: newChatAccumulator("real")}}

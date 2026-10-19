@@ -22,10 +22,10 @@ type responsesEmitter struct {
 }
 
 type emittedItem struct {
-	kind   string // "message", "reasoning" or "function_call"
-	id     string
-	index  int
-	text   strings.Builder // message text, reasoning summary, or call arguments
+	kind      string // "message", "reasoning" or "function_call"
+	id        string
+	index     int
+	text      strings.Builder // message text, reasoning summary, or call arguments
 	callID    string
 	name      string
 	signature string // a Gemini thought signature carried on the call
