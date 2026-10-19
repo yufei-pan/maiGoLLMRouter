@@ -257,7 +257,7 @@ func (s *Server) log(id, endpoint, clientKey, model string, latency int64, reqBo
 		Status:       res.Status,
 		LatencyMS:    latency,
 		Attempts:     res.Attempts,
-		Request:      json.RawMessage(reqBody),
+		Request:      json.RawMessage(logstore.ScrubAudio(reqBody)),
 		Response:     json.RawMessage(res.Body),
 		Stream:       stream,
 	}

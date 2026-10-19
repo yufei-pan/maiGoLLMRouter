@@ -222,3 +222,53 @@ func TestStreamLoggedWithStreamFlag(t *testing.T) {
 		t.Errorf("entry = %s", raw)
 	}
 }
+
+func TestChatLogHasNoAudio(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"heard"}}]}`)
+	}))
+	defer backend.Close()
+	logs, err := logstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	clip := "QUJDREVGR0hJSktMTU5PUA=="
+	body := `{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"hi"},{"type":"input_audio","input_audio":{"data":"` + clip + `","format":"wav"}}]}]}`
+	resp := post(t, routerServer(t, backend.URL, "", logs), "/v1/chat/completions", body)
+	_, _ = io.ReadAll(resp.Body)
+	deadline := time.Now().Add(2 * time.Second)
+	for len(logs.Recent()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	recent := logs.Recent()
+	if len(recent) == 0 {
+		t.Fatal("no log entry")
+	}
+	raw, err := logs.ReadEntry(recent[0].Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), clip) {
+		t.Error("the log holds the audio bytes")
+	}
+	var entry struct {
+		Request struct {
+			Messages []struct {
+				Content []struct {
+					InputAudio struct {
+						Data string `json:"data"`
+					} `json:"input_audio"`
+				} `json:"content"`
+			} `json:"messages"`
+		} `json:"request"`
+	}
+	if err := json.Unmarshal(raw, &entry); err != nil {
+		t.Fatal(err)
+	}
+	if got := entry.Request.Messages[0].Content[1].InputAudio.Data; got != "<16 bytes audio/wav>" {
+		t.Errorf("logged audio = %q, want <16 bytes audio/wav>", got)
+	}
+	if recent[0].RequestPreview != "hi" {
+		t.Errorf("preview = %q, want hi", recent[0].RequestPreview)
+	}
+}
