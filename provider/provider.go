@@ -21,6 +21,7 @@ const (
 	OpChat Operation = iota
 	OpEmbed
 	OpResponses
+	OpSpeech // /v1/audio/speech: Request.Speech
 )
 
 // ResponsesMode selects how an OpResponses request reaches a downstream that
@@ -42,6 +43,9 @@ type Request struct {
 	ResponsesMode ResponsesMode  // OpResponses only; meaningful for kind "openai"
 	Provider      string         // provider name; with Model, names who signed a Gemini tool call
 	Signatures    *SignatureCache
+	Speech        *SpeechRequest // OpSpeech only
+	AudioAPI      string         // the provider's audio dialect: "openai" or "stepfun"
+	FFmpeg        string         // ffmpeg program, for converting audio a provider can't read
 }
 
 // signer names the provider/model that writes this request's reply.
@@ -60,7 +64,8 @@ type Response struct {
 	OutboundBody  []byte // outbound request body sent downstream (for logging)
 	RawResponse   []byte // raw downstream response body (for logging)
 	LearnChatOnly bool   // a probe found that the downstream has no /responses route
-	Incompatible  bool   // this Responses body cannot be served over the chat dialect
+	Incompatible  bool   // this request cannot be served over this provider's dialect
+	ContentType   string // speech: the audio's type, as the provider sent it
 }
 
 // OK reports whether the HTTP call itself succeeded (2xx). It does not assess
@@ -75,7 +80,9 @@ func (r *Response) OK() bool {
 func Call(ctx context.Context, client *http.Client, kind, baseURL, apiKey string, req Request) (*Response, error) {
 	var resp *Response
 	var err error
-	if req.Op == OpResponses && kind != "openai" {
+	if req.Op == OpSpeech {
+		resp, err = callSpeech(ctx, client, kind, baseURL, apiKey, req)
+	} else if req.Op == OpResponses && kind != "openai" {
 		resp, err = callResponsesViaChat(ctx, client, kind, baseURL, apiKey, req)
 	} else {
 		switch kind {
