@@ -74,3 +74,14 @@ func TestConcurrentSnapshot(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestOnCommitShowsStreaming(t *testing.T) {
+	r := New()
+	e := r.Register(Meta{ID: "req-s", StartedAt: "2026-10-18T12:00:00Z"})
+	var _ router.CommitObserver = e
+	e.OnCommit("openai", "m")
+	snap := r.Snapshot()
+	if snap[0].CurrentTarget != "openai/m" || snap[0].LastOutcome != "streaming" {
+		t.Errorf("snapshot target/outcome = %q/%q, want openai/m streaming", snap[0].CurrentTarget, snap[0].LastOutcome)
+	}
+}

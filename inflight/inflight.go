@@ -49,6 +49,15 @@ func (e *Entry) OnAttempt(a router.Attempt) {
 	e.LastOutcome = a.Outcome
 }
 
+// OnCommit records that a streamed request committed to provider/model: its
+// output is reaching the client.
+func (e *Entry) OnCommit(provider, model string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.CurrentTarget = provider + "/" + model
+	e.LastOutcome = "streaming"
+}
+
 func (e *Entry) snapshot() Entry {
 	e.mu.Lock()
 	defer e.mu.Unlock()

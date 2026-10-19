@@ -62,6 +62,7 @@ type Entry struct {
 	Attempts     any             `json:"attempts"`
 	Request      json.RawMessage `json:"request,omitempty"`
 	Response     json.RawMessage `json:"response,omitempty"`
+	Stream       bool            `json:"stream,omitempty"` // the reply went out as a stream; Response is it rebuilt
 }
 
 // IndexEntry is one row of index.tsv: a lightweight projection used for the log

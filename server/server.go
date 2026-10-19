@@ -169,10 +169,13 @@ func (s *Server) handle(op provider.Operation) http.HandlerFunc {
 			return
 		}
 
+		streamed := isStreamRequest(op, body)
 		s.mu.RLock()
 		coerce := s.cfg.Server.CoerceTrailingAssistant
 		s.mu.RUnlock()
-		if coerce {
+		// A streamed request is never rewritten: annai ends its Responses
+		// requests with a developer message that must reach the model as sent.
+		if coerce && !streamed {
 			switch op {
 			case provider.OpChat:
 				body = provider.CoerceTrailingAssistantTurn(body, "messages")
@@ -200,14 +203,21 @@ func (s *Server) handle(op provider.Operation) http.HandlerFunc {
 		if live != nil {
 			ctx = router.WithAttemptObserver(ctx, live)
 		}
-		res := s.rt.Execute(ctx, op, model, body)
+		var res *router.Result
+		if streamed {
+			res = s.rt.ExecuteStream(ctx, op, model, body, newSSESink(w))
+		} else {
+			res = s.rt.Execute(ctx, op, model, body)
+		}
 		latency := time.Since(start).Milliseconds()
 
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(res.Status)
-		_, _ = w.Write(res.Body)
+		if !res.Committed {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(res.Status)
+			_, _ = w.Write(res.Body)
+		}
 
-		s.log(reqID, endpoint, clientKey, model, latency, raw, res)
+		s.log(reqID, endpoint, clientKey, model, latency, raw, res, streamed)
 	}
 }
 
@@ -230,7 +240,7 @@ func (s *Server) authorize(r *http.Request) (string, bool) {
 	return token, true
 }
 
-func (s *Server) log(id, endpoint, clientKey, model string, latency int64, reqBody []byte, res *router.Result) {
+func (s *Server) log(id, endpoint, clientKey, model string, latency int64, reqBody []byte, res *router.Result, stream bool) {
 	if s.logs == nil {
 		return
 	}
@@ -249,6 +259,7 @@ func (s *Server) log(id, endpoint, clientKey, model string, latency int64, reqBo
 		Attempts:     res.Attempts,
 		Request:      json.RawMessage(reqBody),
 		Response:     json.RawMessage(res.Body),
+		Stream:       stream,
 	}
 	_ = s.logs.Write(entry)
 }
