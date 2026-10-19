@@ -155,12 +155,16 @@ func stepfunTranscription(ctx context.Context, client *http.Client, baseURL, api
 			return resp, nil
 		case "error":
 			// A stream that answered 200 still failed. It blacks out the key
-			// only when it says something about the key (auth, quota, rate):
-			// otherwise a client could get keys blacked out with crafted audio.
-			// Its status is 400 when the request itself was at fault.
-			code := fmt.Sprint(m.Code)
+			// only when its structured code is about the key (auth, quota,
+			// rate): message text may repeat request data, so it can only
+			// spare a key, never condemn one. Its status is 400 when the
+			// request itself was at fault.
+			code := ""
+			if m.Code != nil {
+				code = fmt.Sprint(m.Code)
+			}
 			switch {
-			case stepfunKeyFault(code, m.Message):
+			case stepfunKeyFault(code):
 				resp.HTTPStatus = http.StatusBadGateway
 			case stepfunRequestFault(code, m.Message):
 				resp.HTTPStatus, resp.NoBlackout = http.StatusBadRequest, true
@@ -176,12 +180,13 @@ func stepfunTranscription(ctx context.Context, client *http.Client, baseURL, api
 	return resp, nil
 }
 
-// stepfunKeyFault reports an error event about the key itself: its auth, quota
-// or rate limit, the only kind that says the key should rest.
-func stepfunKeyFault(code, message string) bool {
-	s := strings.ToLower(code + " " + message)
-	for _, w := range []string{"auth", "api key", "apikey", "permission", "forbidden", "quota", "balance", "insufficient", "rate limit", "too many requests"} {
-		if strings.Contains(s, w) {
+// stepfunKeyFault reports an error code about the key itself (its auth,
+// quota or rate limit), the only kind that says the key should rest. It reads
+// the structured code only, never message text.
+func stepfunKeyFault(code string) bool {
+	c := strings.ToLower(code)
+	for _, w := range []string{"auth", "api_key", "apikey", "permission", "forbidden", "quota", "balance", "insufficient", "rate_limit", "401", "402", "403", "429"} {
+		if strings.Contains(c, w) {
 			return true
 		}
 	}

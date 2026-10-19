@@ -206,20 +206,25 @@ func TestStepfunTranscriptionRejectsOddFormats(t *testing.T) {
 }
 
 // TestStepfunErrorEventsBlackOutOnlyForKeyFaults verifies an error event on a
-// stream that answered 200 blacks out the key only when it is about the key.
+// stream that answered 200 blacks out the key only when its structured code is
+// about the key. Message text may repeat request data, so it can only ever
+// spare a key, never condemn one.
 func TestStepfunErrorEventsBlackOutOnlyForKeyFaults(t *testing.T) {
-	for msg, noBlackout := range map[string]bool{
-		"internal error":       true,
-		"invalid audio format": true,
-		"quota exceeded":       false,
-		"invalid api key":      false,
-		"rate limit exceeded":  false,
+	for event, noBlackout := range map[string]bool{
+		`{"type":"error","message":"internal error"}`:                              true,
+		`{"type":"error","message":"invalid audio format"}`:                        true,
+		`{"type":"error","message":"quota exceeded"}`:                              true,
+		`{"type":"error","message":"invalid api key"}`:                             true,
+		`{"type":"error","code":"insufficient_quota","message":"out of credit"}`:   false,
+		`{"type":"error","code":"invalid_api_key","message":"bad key"}`:            false,
+		`{"type":"error","code":"rate_limit_exceeded","message":"slow down"}`:      false,
+		`{"type":"error","code":"rate_limit_exceeded","message":"invalid format"}`: false,
 	} {
-		srv := stepfunASR(t, nil, `{"type":"error","message":"`+msg+`"}`)
+		srv := stepfunASR(t, nil, event)
 		resp, _ := Call(context.Background(), srv.Client(), "openai", srv.URL, "k",
 			transcribeReq("stepaudio-2.5-asr", "stepfun", TranscriptionRequest{Audio: []byte("RIFF"), Format: "wav"}))
 		if resp.NoBlackout != noBlackout || resp.OK() {
-			t.Errorf("%q: NoBlackout %v (want %v), status %d", msg, resp.NoBlackout, noBlackout, resp.HTTPStatus)
+			t.Errorf("%s: NoBlackout %v (want %v), status %d", event, resp.NoBlackout, noBlackout, resp.HTTPStatus)
 		}
 	}
 }
