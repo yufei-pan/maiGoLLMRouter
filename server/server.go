@@ -170,6 +170,10 @@ func (s *Server) handle(op provider.Operation) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "missing required field: model", "invalid_request_error")
 			return
 		}
+		if msg := modelRefusal(model); msg != "" {
+			writeCodedError(w, http.StatusBadRequest, msg, "invalid_request_error", "invalid_model")
+			return
+		}
 
 		streamed := isStreamRequest(op, body)
 		s.mu.RLock()

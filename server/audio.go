@@ -57,6 +57,10 @@ func (s *Server) handleSpeech(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "model and input are required", "invalid_request_error")
 		return
 	}
+	if msg := modelRefusal(model); msg != "" {
+		writeCodedError(w, http.StatusBadRequest, msg, "invalid_request_error", "invalid_model")
+		return
+	}
 	format := "mp3"
 	if v, given := body["response_format"]; given {
 		f, _ := v.(string)
@@ -131,6 +135,10 @@ func (s *Server) handleTranscription(w http.ResponseWriter, r *http.Request) {
 	model, tr, msg := readTranscription(w, r)
 	if msg != "" {
 		writeError(w, http.StatusBadRequest, msg, "invalid_request_error")
+		return
+	}
+	if msg := modelRefusal(model); msg != "" {
+		writeCodedError(w, http.StatusBadRequest, msg, "invalid_request_error", "invalid_model")
 		return
 	}
 	logged := map[string]any{"model": model, "audio": describe(len(tr.Audio), "audio/"+tr.Format), "response_format": tr.ResponseFormat}
