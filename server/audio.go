@@ -111,7 +111,7 @@ func convertSpeech(ctx context.Context, ffmpeg string, data []byte, ct, format s
 	if err == nil {
 		return out, oct
 	}
-	log.Printf("WARNING: speech not converted to %s: %v", format, err)
+	log.Printf("WARNING: speech not converted to %s: %q", format, err)
 	if audioconv.IsRawPCM(ct) {
 		return audioconv.WrapPCM(data, audioconv.PCMRate(ct)), "audio/wav"
 	}

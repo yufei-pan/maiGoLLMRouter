@@ -35,14 +35,23 @@ func (b *Blackout) SetDuration(d time.Duration) {
 }
 
 // Fail marks an (API key, model) combination as blacked out for the configured
-// duration.
+// duration, then removes every entry whose window has passed. Blocked removes
+// only the pair it looks up, so without this sweep a model name that is never
+// asked about again would stay forever; with it the map holds only the pairs
+// that failed within the last blackout window.
 func (b *Blackout) Fail(key, model string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.dur <= 0 {
 		return
 	}
-	b.mu.Lock()
-	b.until[blackoutKey{key: key, model: model}] = time.Now().Add(b.dur)
-	b.mu.Unlock()
+	now := time.Now()
+	b.until[blackoutKey{key: key, model: model}] = now.Add(b.dur)
+	for bk, t := range b.until {
+		if now.After(t) {
+			delete(b.until, bk)
+		}
+	}
 }
 
 // Success removes an (API key, model) combination from the blackout list.

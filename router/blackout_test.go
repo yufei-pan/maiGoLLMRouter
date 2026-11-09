@@ -35,3 +35,17 @@ func TestBlackoutSuccessOnUnknownPairIsNoop(t *testing.T) {
 		t.Error("clearing a pair that was never blacked out must not block it")
 	}
 }
+
+func TestFailRemovesExpired(t *testing.T) {
+	b := NewBlackout(time.Nanosecond)
+	b.Fail("k", "old")
+	b.SetDuration(time.Hour)
+	b.Fail("k", "new")
+
+	if len(b.until) != 1 {
+		t.Errorf("entries = %d, want 1: Fail must remove the expired pair", len(b.until))
+	}
+	if !b.Blocked("k", "new") {
+		t.Error("the pair that just failed must be blacked out")
+	}
+}

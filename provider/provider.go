@@ -79,8 +79,12 @@ func (r *Response) OK() bool {
 
 // Call dispatches to the correct dialect. A non-nil error indicates a
 // transport-level failure (no usable HTTP response); HTTP error statuses are
-// reported via Response.HTTPStatus with a nil error.
+// reported via Response.HTTPStatus with a nil error. A Gemini model name that
+// validGeminiModel refuses gets a 404 model_not_found, and nothing is sent.
 func Call(ctx context.Context, client *http.Client, kind, baseURL, apiKey string, req Request) (*Response, error) {
+	if kind == "gemini" && !validGeminiModel(req.Model) {
+		return geminiModelNotFound(req.Model), nil
+	}
 	var resp *Response
 	var err error
 	if req.Op == OpSpeech {
@@ -116,6 +120,9 @@ func Call(ctx context.Context, client *http.Client, kind, baseURL, apiKey string
 // For a stream, timeout limits the wait for the first output and then the
 // longest silence between reads; client must have no Timeout of its own.
 func CallStream(ctx context.Context, client *http.Client, kind, baseURL, apiKey string, timeout time.Duration, req Request) (*Stream, *Response, error) {
+	if kind == "gemini" && !validGeminiModel(req.Model) {
+		return nil, geminiModelNotFound(req.Model), nil
+	}
 	var stream *Stream
 	var resp *Response
 	var err error

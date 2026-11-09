@@ -1,14 +1,17 @@
 package router
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"maiGoLLMRouter/config"
@@ -710,6 +713,64 @@ targets = ["openai/real-model"]
 	}
 	if r.blackout.Blocked("n1", "real-model") {
 		t.Errorf("bad output must not black out the normal key")
+	}
+}
+
+// A direct request for a Gemini model path that climbs out of models/ fails as
+// an unknown model, and the router's key never reaches the backend.
+func TestGeminiPathModelSendsNothing(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		fmt.Fprint(w, `{"candidates":[{"content":{"parts":[{"text":"hi"}],"role":"model"},"finishReason":"STOP"}]}`)
+	}))
+	defer srv.Close()
+
+	cfg := loadCfg(t, fmt.Sprintf(`
+[[provider]]
+name = "google"
+kind = "gemini"
+base_url = %q
+keys = ["gk"]
+`, srv.URL))
+
+	res := New(cfg).Execute(context.Background(), provider.OpChat, "google/../x", chatReq())
+	if res.Success || res.Status != http.StatusNotFound {
+		t.Errorf("success=%v status=%d, want a failed 404; attempts=%+v", res.Success, res.Status, res.Attempts)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Errorf("backend hits = %d, want 0", n)
+	}
+}
+
+// The bad-output warning quotes the model and finish reason, which come from
+// the client and the provider, so a newline in either can't forge a line.
+func TestBadOutputWarningQuotes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"choices":[{"finish_reason":"weird\nx","message":{"role":"assistant","content":"hi"}}]}`)
+	}))
+	defer srv.Close()
+
+	cfg := loadCfg(t, fmt.Sprintf(`
+[[provider]]
+name = "openai"
+kind = "openai"
+base_url = %q
+keys = ["n1"]
+`, srv.URL))
+
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prev)
+
+	New(cfg).Execute(context.Background(), provider.OpChat, "openai/a\nb", chatReq())
+	out := buf.String()
+	if !strings.Contains(out, `model="a\nb"`) || !strings.Contains(out, `finish_reason="weird\nx"`) {
+		t.Errorf("warning does not quote the model and finish reason: %q", out)
+	}
+	if n := strings.Count(out, "\n"); n != 1 {
+		t.Errorf("warning has %d newlines, want 1: %q", n, out)
 	}
 }
 

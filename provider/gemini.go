@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -49,6 +50,31 @@ func callGemini(ctx context.Context, client *http.Client, baseURL, apiKey string
 
 func geminiModelPath(model string) string {
 	return "models/" + strings.TrimPrefix(model, "models/")
+}
+
+// validGeminiModel reports whether model can go into geminiModelPath. The
+// name goes into the URL path as it is, so a ".." segment would climb out of
+// models/ to other Gemini API paths with the router's key, and "?", "#" or "%"
+// would start a query or fragment or be decoded by the server.
+func validGeminiModel(model string) bool {
+	name := strings.TrimPrefix(model, "models/")
+	if strings.ContainsAny(name, "?#%") {
+		return false
+	}
+	for _, seg := range strings.Split(name, "/") {
+		if seg == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// geminiModelNotFound answers a model that validGeminiModel refuses, without
+// sending anything: a 404 the router judges like any unknown model's.
+func geminiModelNotFound(model string) *Response {
+	msg := mustJSON(fmt.Sprintf("model not found: %q", model))
+	b := []byte(`{"error":{"message":` + string(msg) + `,"type":"invalid_request_error","code":"model_not_found"}}`)
+	return &Response{HTTPStatus: http.StatusNotFound, RawResponse: b, OpenAIBody: b}
 }
 
 func geminiChat(ctx context.Context, client *http.Client, baseURL, apiKey string, req Request) (*Response, error) {

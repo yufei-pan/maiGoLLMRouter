@@ -421,7 +421,7 @@ func (r *Router) judge(ctx context.Context, st *routerState, p *config.Provider,
 	if strings.EqualFold(resp.FinishReason, "length") {
 		detail = " (response truncated by max output tokens)"
 	}
-	log.Printf("WARNING: output did not finish normally: provider=%s model=%s key=%s finish_reason=%s%s — moving on without blackout",
+	log.Printf("WARNING: output did not finish normally: provider=%s model=%q key=%s finish_reason=%q%s — moving on without blackout",
 		p.Name, model, maskKey(key), reason, detail)
 	return att, outcomeBadOutput
 }
