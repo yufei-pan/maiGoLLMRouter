@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 )
 
@@ -22,36 +24,82 @@ func ScrubAudio(raw []byte) []byte {
 	if dec.Decode(&body) != nil {
 		return raw
 	}
-	changed := false
+	if out, ok := ScrubAudioBody(body); ok {
+		return out
+	}
+	return raw
+}
+
+// ScrubAudioBody returns the JSON to log and true when body holds input_audio
+// (each clip as "<N bytes audio/<format>>", HTML not escaped); else nil, false.
+// body is never modified: the maps and slices on the way to a clip are copied.
+func ScrubAudioBody(body map[string]any) ([]byte, bool) {
+	var out map[string]any // body with its scrubbed lists, made at the first clip
 	for _, key := range []string{"messages", "input"} {
 		items, _ := body[key].([]any)
-		for _, item := range items {
-			m, _ := item.(map[string]any)
-			parts, _ := m["content"].([]any)
-			for _, part := range parts {
-				pm, _ := part.(map[string]any)
-				if pm["type"] != "input_audio" {
+		var scrubbedItems []any
+		for i, item := range items {
+			msg, _ := item.(map[string]any)
+			parts, _ := msg["content"].([]any)
+			var scrubbedParts []any
+			for j, part := range parts {
+				clip, ok := scrubClip(part)
+				if !ok {
 					continue
 				}
-				if ia, ok := pm["input_audio"].(map[string]any); ok {
-					if data, ok := ia["data"].(string); ok {
-						ia["data"] = describeAudio(data, ia["format"])
-						changed = true
-					}
+				if scrubbedParts == nil {
+					scrubbedParts = slices.Clone(parts)
 				}
+				scrubbedParts[j] = clip
 			}
+			if scrubbedParts == nil {
+				continue
+			}
+			if scrubbedItems == nil {
+				scrubbedItems = slices.Clone(items)
+			}
+			scrubbedItems[i] = with(msg, "content", scrubbedParts)
 		}
+		if scrubbedItems == nil {
+			continue
+		}
+		if out == nil {
+			out = maps.Clone(body)
+		}
+		out[key] = scrubbedItems
 	}
-	if !changed {
-		return raw
+	if out == nil {
+		return nil, false
 	}
-	var out bytes.Buffer
-	enc := json.NewEncoder(&out)
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
 	enc.SetEscapeHTML(false) // keep "<N bytes …>" readable in the log
-	if enc.Encode(body) != nil {
-		return raw
+	if enc.Encode(out) != nil {
+		return nil, false
 	}
-	return bytes.TrimRight(out.Bytes(), "\n")
+	return bytes.TrimRight(b.Bytes(), "\n"), true
+}
+
+// scrubClip returns a copy of an input_audio content part with its clip
+// described, and true; false when part is not one.
+func scrubClip(part any) (map[string]any, bool) {
+	p, _ := part.(map[string]any)
+	if p["type"] != "input_audio" {
+		return nil, false
+	}
+	audio, _ := p["input_audio"].(map[string]any)
+	data, ok := audio["data"].(string)
+	if !ok {
+		return nil, false
+	}
+	return with(p, "input_audio", with(audio, "data", describeAudio(data, audio["format"]))), true
+}
+
+// with returns a copy of m with key set to v.
+func with(m map[string]any, key string, v any) map[string]any {
+	c := maps.Clone(m)
+	c[key] = v
+	return c
 }
 
 // describeAudio is "<N bytes audio/<format>>" for base64 audio, possibly a

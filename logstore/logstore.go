@@ -75,6 +75,10 @@ type Entry struct {
 	Request      json.RawMessage `json:"request,omitempty"`
 	Response     json.RawMessage `json:"response,omitempty"`
 	Stream       bool            `json:"stream,omitempty"` // the reply went out as a stream; Response is it rebuilt
+
+	// RequestPreview is the index row's preview, set by callers that decoded
+	// the body so Write never decodes it again; nil derives it from Request.
+	RequestPreview *string `json:"-"`
 }
 
 // IndexEntry is one row of index.tsv: a lightweight projection used for the log
@@ -231,7 +235,11 @@ func (s *Store) indexEntryFor(e Entry, relPath string) IndexEntry {
 		idx.InTokens = &p
 		idx.OutTokens = &c
 	}
-	idx.RequestPreview = RequestContentPreview(e.Request, DefaultRequestPreviewLen)
+	if e.RequestPreview != nil {
+		idx.RequestPreview = *e.RequestPreview
+	} else {
+		idx.RequestPreview = RequestContentPreview(e.Request, DefaultRequestPreviewLen)
+	}
 	return idx
 }
 

@@ -10,161 +10,126 @@ import (
 // are stored in the index row for the web UI list view.
 const DefaultRequestPreviewLen = 16
 
-// RequestContentPreview extracts a short plain-text preview from an inbound
-// request body: the first message content for chat, the first Responses input
-// item with text, or the input field for embeddings. Returns empty when
-// nothing recognizable is present.
+// RequestContentPreview is RequestPreviewFromBody for a raw request body.
+// Invalid JSON has no preview.
 func RequestContentPreview(req json.RawMessage, maxLen int) string {
 	if len(req) == 0 || maxLen <= 0 {
 		return ""
 	}
-	var body map[string]json.RawMessage
+	var body map[string]any
 	if err := json.Unmarshal(req, &body); err != nil {
 		return ""
 	}
-	text := requestTextFromBody(body)
-	if text == "" {
-		return ""
-	}
-	return truncateRunes(text, maxLen)
+	return RequestPreviewFromBody(body, maxLen)
 }
 
-// EstimateInTokens returns a rough inbound token count for live UI previews.
-// It sums message/input text (~4 runes per token) and falls back to request
-// JSON size when no text is found.
+// RequestPreviewFromBody extracts a short plain-text preview from a decoded
+// inbound request body: the first message content for chat, the first
+// Responses input item with text, or the input field for embeddings. Returns
+// empty when nothing recognizable is present.
+func RequestPreviewFromBody(body map[string]any, maxLen int) string {
+	return truncateRunes(requestText(body), maxLen)
+}
+
+// EstimateInTokens is EstimateInTokensFromBody for a raw request body. Invalid
+// JSON is estimated from its size.
 func EstimateInTokens(req json.RawMessage) int {
 	if len(req) == 0 {
 		return 0
 	}
-	var body map[string]json.RawMessage
+	var body map[string]any
 	if err := json.Unmarshal(req, &body); err != nil {
 		return (len(req) + 3) / 4
 	}
+	return EstimateInTokensFromBody(body)
+}
+
+// EstimateInTokensFromBody returns a rough inbound token count for live UI
+// previews: message and input text at ~4 runes per token, plus a small
+// per-item overhead. A body with no text estimates 0.
+func EstimateInTokensFromBody(body map[string]any) int {
+	messages, _ := body["messages"].([]any)
 	chars := 0
-	if raw, ok := body["messages"]; ok {
-		chars += allMessageTextRunes(raw)
+	for _, msg := range messages {
+		m, _ := msg.(map[string]any)
+		chars += utf8.RuneCountInString(contentText(m["content"]))
 	}
-	if raw, ok := body["input"]; ok {
-		chars += allInputTextRunes(raw)
-	}
+	chars += inputTextRunes(body["input"])
 	if chars == 0 {
 		return 0
 	}
-	if raw, ok := body["messages"]; ok {
-		var msgs []json.RawMessage
-		if err := json.Unmarshal(raw, &msgs); err == nil {
-			chars += len(msgs) * 4 // rough per-message overhead
-		}
-	}
-	if raw, ok := body["input"]; ok {
-		var items []json.RawMessage
-		if err := json.Unmarshal(raw, &items); err == nil {
-			chars += len(items) * 4
-		}
-	}
+	items, _ := body["input"].([]any)
+	chars += (len(messages) + len(items)) * 4 // rough per-item overhead
 	return (chars + 3) / 4
 }
 
-func allMessageTextRunes(raw json.RawMessage) int {
-	var messages []map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &messages); err != nil {
-		return 0
+func requestText(body map[string]any) string {
+	if text := messagesText(body["messages"]); text != "" {
+		return text
 	}
-	n := 0
-	for _, msg := range messages {
-		n += utf8.RuneCountInString(jsonContentText(msg["content"]))
+	if text := inputText(body["input"]); text != "" {
+		return text
 	}
-	return n
+	return contentText(body["content"])
 }
 
-func requestTextFromBody(body map[string]json.RawMessage) string {
-	if raw, ok := body["messages"]; ok {
-		if text := textFromMessages(raw); text != "" {
-			return text
-		}
-	}
-	if raw, ok := body["input"]; ok {
-		if text := jsonInputText(raw); text != "" {
-			return text
-		}
-	}
-	if raw, ok := body["content"]; ok {
-		return jsonContentText(raw)
-	}
-	return ""
-}
-
-func textFromMessages(raw json.RawMessage) string {
-	var messages []map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &messages); err != nil {
-		return ""
-	}
+// messagesText is the first non-empty message content.
+func messagesText(v any) string {
+	messages, _ := v.([]any)
 	for _, msg := range messages {
-		if content := jsonContentText(msg["content"]); content != "" {
+		m, _ := msg.(map[string]any)
+		if content := contentText(m["content"]); content != "" {
 			return content
 		}
 	}
 	return ""
 }
 
-func parseJSONString(raw json.RawMessage) (string, bool) {
-	if len(raw) == 0 {
-		return "", false
+// contentText flattens an OpenAI-style "content" value (string or array of
+// text parts) into plain text.
+func contentText(v any) string {
+	switch c := v.(type) {
+	case string:
+		return c
+	case []any:
+		var b strings.Builder
+		for _, part := range c {
+			p, _ := part.(map[string]any)
+			if t, ok := p["text"].(string); ok {
+				b.WriteString(t)
+			}
+		}
+		return b.String()
 	}
-	var s string
-	if err := json.Unmarshal(raw, &s); err != nil {
-		return "", false
-	}
-	return s, true
+	return ""
 }
 
-// jsonContentText flattens an OpenAI-style "content" value (string or array of
-// text parts) into plain text.
-func jsonContentText(raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
-	}
-	var s string
-	if err := json.Unmarshal(raw, &s); err == nil {
-		return s
-	}
-	var parts []map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &parts); err != nil {
-		return ""
-	}
-	var b strings.Builder
-	for _, part := range parts {
-		if t, ok := parseJSONString(part["text"]); ok {
-			b.WriteString(t)
+// allStrings reports whether items is a non-empty array of strings: an
+// embeddings input.
+func allStrings(items []any) bool {
+	for _, item := range items {
+		if _, ok := item.(string); !ok {
+			return false
 		}
 	}
-	return b.String()
+	return len(items) > 0
 }
 
-func jsonInputText(raw json.RawMessage) string {
-	if text := jsonContentText(raw); text != "" {
+func inputText(v any) string {
+	if text := contentText(v); text != "" {
 		return text
 	}
-	var items []json.RawMessage
-	if err := json.Unmarshal(raw, &items); err != nil {
-		return ""
-	}
-	// Embeddings: array of strings — concatenate (existing behavior).
-	var stringParts strings.Builder
-	allStrings := true
-	for _, item := range items {
-		s, ok := parseJSONString(item)
-		if !ok {
-			allStrings = false
-			break
+	items, _ := v.([]any)
+	if allStrings(items) {
+		// Embeddings: array of strings, concatenated.
+		var b strings.Builder
+		for _, item := range items {
+			b.WriteString(item.(string))
 		}
-		stringParts.WriteString(s)
-	}
-	if allStrings && len(items) > 0 {
-		return stringParts.String()
+		return b.String()
 	}
 	// Responses: array of role/typed items — first non-empty content, matching
-	// textFromMessages (chat) so the UI preview is not blank.
+	// messagesText (chat) so the UI preview is not blank.
 	for _, item := range items {
 		if text := responsesInputItemText(item); text != "" {
 			return text
@@ -173,19 +138,16 @@ func jsonInputText(raw json.RawMessage) string {
 	return ""
 }
 
-// allInputTextRunes sums text across an embeddings string/array or Responses
+// inputTextRunes sums text across an embeddings string/array or Responses
 // input item list for live in-token estimates.
-func allInputTextRunes(raw json.RawMessage) int {
-	if text := jsonContentText(raw); text != "" {
+func inputTextRunes(v any) int {
+	if text := contentText(v); text != "" {
 		return utf8.RuneCountInString(text)
 	}
-	var items []json.RawMessage
-	if err := json.Unmarshal(raw, &items); err != nil {
-		return 0
-	}
+	items, _ := v.([]any)
 	n := 0
 	for _, item := range items {
-		if s, ok := parseJSONString(item); ok {
+		if s, ok := item.(string); ok {
 			n += utf8.RuneCountInString(s)
 			continue
 		}
@@ -196,22 +158,13 @@ func allInputTextRunes(raw json.RawMessage) int {
 
 // responsesInputItemText extracts plain text from one Responses input item
 // (role message with content string/parts, or function_call_output.output).
-func responsesInputItemText(raw json.RawMessage) string {
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return ""
+func responsesInputItemText(v any) string {
+	m, _ := v.(map[string]any)
+	if text := contentText(m["content"]); text != "" {
+		return text
 	}
-	if c, ok := m["content"]; ok {
-		if text := jsonContentText(c); text != "" {
-			return text
-		}
-	}
-	if o, ok := m["output"]; ok {
-		if s, ok := parseJSONString(o); ok {
-			return s
-		}
-	}
-	return ""
+	s, _ := m["output"].(string)
+	return s
 }
 
 func truncateRunes(s string, maxLen int) string {

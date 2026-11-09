@@ -44,3 +44,34 @@ func indexOf(s, sub string) int {
 	}
 	return -1
 }
+
+func TestScrubAudioBodyCopies(t *testing.T) {
+	in := `{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"hi"},{"type":"input_audio","input_audio":{"data":"QUJD","format":"wav"}}]}]}`
+	want := `{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"hi"},{"type":"input_audio","input_audio":{"data":"<3 bytes audio/wav>","format":"wav"}}]}]}`
+	body := decodeBody(t, in)
+
+	out, ok := ScrubAudioBody(body)
+	if !ok {
+		t.Fatalf("a body with a clip: ok = false")
+	}
+	if !contains(string(out), `"<3 bytes audio/wav>"`) {
+		t.Errorf("clip not described, or HTML-escaped: %s", out)
+	}
+	var got any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("scrubbed JSON: %v: %s", err, out)
+	}
+	if exp := any(decodeBody(t, want)); !reflect.DeepEqual(got, exp) {
+		t.Errorf("scrubbed = %v\nwant %v", got, exp)
+	}
+	// The caller's body is untouched: its clip is still "QUJD", and nothing
+	// else changed either.
+	if !reflect.DeepEqual(body, decodeBody(t, in)) {
+		t.Errorf("ScrubAudioBody modified its input: %v", body)
+	}
+
+	out, ok = ScrubAudioBody(decodeBody(t, `{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	if out != nil || ok {
+		t.Errorf("a body without audio: got %q, %v; want nil, false", out, ok)
+	}
+}

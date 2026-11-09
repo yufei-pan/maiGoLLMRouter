@@ -492,3 +492,34 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+func TestWriteUsesGivenPreview(t *testing.T) {
+	s, _ := New(t.TempDir())
+	tests := []struct {
+		name    string
+		preview *string
+		want    string
+	}{
+		{"given", new("given"), "given"},
+		{"given empty", new(""), ""},
+		{"nil derives from Request", nil, "from raw"},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := Entry{
+				Time:           testBase.Add(time.Duration(i) * time.Second).Format(time.RFC3339Nano),
+				ID:             fmt.Sprintf("req-%04d", i),
+				Endpoint:       "/v1/chat/completions",
+				Status:         200,
+				Request:        json.RawMessage(`{"messages":[{"role":"user","content":"from raw"}]}`),
+				RequestPreview: tt.preview,
+			}
+			if err := s.Write(e); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			if got := s.Recent()[0].RequestPreview; got != tt.want {
+				t.Errorf("index preview = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
