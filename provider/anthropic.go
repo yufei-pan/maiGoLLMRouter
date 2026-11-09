@@ -270,7 +270,7 @@ func anthropicTools(tools, functions any) []any {
 		if schema == nil {
 			schema = map[string]any{"type": "object", "properties": map[string]any{}}
 		}
-		entry["input_schema"] = schema
+		entry["input_schema"] = anthropicInputSchema(schema)
 		out = append(out, entry)
 	}
 	if arr, ok := tools.([]any); ok {
@@ -292,6 +292,25 @@ func anthropicTools(tools, functions any) []any {
 				appendFn(fm)
 			}
 		}
+	}
+	return out
+}
+
+// anthropicInputSchema returns the schema Anthropic accepts as a tool's input_schema.
+// Anthropic refuses the whole request when oneOf, anyOf or allOf sits at the top level
+// ("input_schema does not support oneOf, allOf, or anyOf at the top level"); they are
+// fine deeper down. OpenAI-style clients do send them there (MaiBot's wait tool says
+// "seconds or until, not both" with a top-level oneOf), so those keys are left out of
+// a copy. The tool's description still states the rule, and the tool checks its own
+// arguments.
+func anthropicInputSchema(schema map[string]any) map[string]any {
+	out := make(map[string]any, len(schema))
+	for k, v := range schema {
+		switch k {
+		case "oneOf", "anyOf", "allOf":
+			continue
+		}
+		out[k] = v
 	}
 	return out
 }
