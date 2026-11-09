@@ -42,6 +42,18 @@ const (
 	// the remainder is discarded up to the next newline, so reads never OOM or
 	// crash on a pathologically long line.
 	maxTSVLine = 1 << 20 // 1 MiB
+
+	// maxBeforeLimit caps how many entries one Before call returns: five of
+	// the web UI's 100-entry pages. Before sizes its buffer by the limit, so
+	// an uncapped limit from a request was a fatal out-of-memory error. A
+	// larger limit is served as this many.
+	maxBeforeLimit = 500
+
+	// dirMode and fileMode are for the log dirs and files the store creates:
+	// they hold every client's prompts and replies, so only the router's own
+	// user may read them. Existing files and dirs keep their modes.
+	dirMode  = 0o700
+	fileMode = 0o600
 )
 
 // Entry is the full per-request record persisted as logs/YYYY-MM/DD/<id>.json.
@@ -97,7 +109,7 @@ func New(dir string) (*Store, error) {
 	// Clean the directory so path-prefix checks in safeEntryPath compare apples
 	// to apples (e.g. "./logs" becomes "logs", matching filepath.Join output).
 	dir = filepath.Clean(dir)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, dirMode); err != nil {
 		return nil, err
 	}
 	s := &Store{dir: dir, tsvPath: filepath.Join(dir, indexFileName)}
@@ -120,7 +132,7 @@ func (s *Store) ensureHeader() error {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	f, err := os.OpenFile(s.tsvPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(s.tsvPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, fileMode)
 	if err != nil {
 		return err
 	}
@@ -180,10 +192,10 @@ func (s *Store) Write(e Entry) error {
 	defer s.mu.Unlock()
 
 	jsonDir := filepath.Join(s.dir, month, day)
-	if err := os.MkdirAll(jsonDir, 0o755); err != nil {
+	if err := os.MkdirAll(jsonDir, dirMode); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(jsonDir, e.ID+entryExt), zstdCompress(jsonBody), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(jsonDir, e.ID+entryExt), zstdCompress(jsonBody), fileMode); err != nil {
 		return err
 	}
 
@@ -225,7 +237,7 @@ func (s *Store) indexEntryFor(e Entry, relPath string) IndexEntry {
 
 // appendIndexLine appends a single TSV row. Caller holds the write lock.
 func (s *Store) appendIndexLine(e IndexEntry) error {
-	f, err := os.OpenFile(s.tsvPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(s.tsvPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, fileMode)
 	if err != nil {
 		return err
 	}
@@ -278,11 +290,13 @@ func (s *Store) Since(ts string) []IndexEntry {
 }
 
 // Before returns up to limit entries strictly older than ts, newest first, by
-// streaming index.tsv. Memory use is bounded by limit regardless of file size.
+// streaming index.tsv. A limit above maxBeforeLimit is served as
+// maxBeforeLimit, so memory use stays bounded whatever the caller asks for.
 func (s *Store) Before(ts string, limit int) ([]IndexEntry, error) {
 	if limit <= 0 {
 		limit = 50
 	}
+	limit = min(limit, maxBeforeLimit)
 	cursor := parseEntryTime(ts)
 
 	s.mu.RLock()
@@ -435,7 +449,7 @@ func (s *Store) pruneIndex(cutoffDay time.Time) error {
 	defer f.Close()
 
 	tmp := s.tsvPath + ".tmp"
-	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, fileMode)
 	if err != nil {
 		return err
 	}

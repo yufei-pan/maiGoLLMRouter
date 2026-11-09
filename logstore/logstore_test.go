@@ -148,6 +148,27 @@ func TestBeforeStreamsOlderPage(t *testing.T) {
 	}
 }
 
+// A huge limit used to size Before's buffer directly, a fatal out-of-memory
+// error. It is served as the cap instead.
+func TestBeforeCapsLimit(t *testing.T) {
+	s, _ := New(t.TempDir())
+	es := writeEntriesAt(t, s, 600, testBase)
+	cursor := parseEntryTime(es[len(es)-1].Time).Add(time.Hour).Format(time.RFC3339Nano)
+
+	got, err := s.Before(cursor, 100000000000)
+	if err != nil {
+		t.Fatalf("before: %v", err)
+	}
+	if len(got) != 500 {
+		t.Fatalf("want 500 entries, got %d", len(got))
+	}
+	for i, e := range got {
+		if want := fmt.Sprintf("2026-06/04/req-%04d", 599-i); e.Path != want {
+			t.Fatalf("before[%d] = %s, want %s (newest first)", i, e.Path, want)
+		}
+	}
+}
+
 func TestReadEntryFullRecord(t *testing.T) {
 	s, _ := New(t.TempDir())
 	writeEntriesAt(t, s, 1, testBase)
@@ -241,6 +262,74 @@ func TestCleanupDisabledIsNoop(t *testing.T) {
 	if got := len(s.Recent()); got != 3 {
 		t.Errorf("disabled cleanup must not prune; got %d", got)
 	}
+}
+
+// wantPerm fails the test unless path's permission bits are want.
+func wantPerm(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Errorf("%s mode = %#o, want %#o", path, got, want)
+	}
+}
+
+func TestLogFileModes(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "logs")
+	s, err := New(dir)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	tsv := filepath.Join(dir, indexFileName)
+	wantPerm(t, dir, 0o700)
+	wantPerm(t, tsv, 0o600)
+
+	// One Write creates the month and day dirs and the entry file.
+	writeEntriesAt(t, s, 1, time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
+	wantPerm(t, filepath.Join(dir, "2020-01"), 0o700)
+	wantPerm(t, filepath.Join(dir, "2020-01", "01"), 0o700)
+	wantPerm(t, filepath.Join(dir, "2020-01", "01", "req-0000"+entryExt), 0o600)
+
+	// Cleanup drops the 2020 row, so pruneIndex renames its temp file over
+	// the index; the testBase row stays.
+	writeEntriesAt(t, s, 1, testBase)
+	if err := s.Cleanup(time.Since(testBase) + 24*time.Hour); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if all, err := s.readAll(); err != nil || len(all) != 1 {
+		t.Fatalf("want 1 index row after cleanup, got %d (%v)", len(all), err)
+	}
+	wantPerm(t, tsv, 0o600)
+}
+
+// Modes of files and dirs that already exist are left alone; the deploy
+// changes them once.
+func TestExistingLogModesUntouched(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "logs")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tsv := filepath.Join(dir, indexFileName)
+	if err := os.WriteFile(tsv, []byte(indexHeader), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Set the modes outright so the umask can't change what the test starts from.
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(tsv, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := New(dir)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	writeEntriesAt(t, s, 1, testBase)
+	wantPerm(t, dir, 0o755)
+	wantPerm(t, tsv, 0o644)
 }
 
 func TestReadEntryWithDotSlashDir(t *testing.T) {
