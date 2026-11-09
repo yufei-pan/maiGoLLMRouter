@@ -29,7 +29,7 @@ import (
 // version is the build version. Override at build time with:
 //
 //	go build -ldflags "-X main.version=1.2.3"
-var version = "0.1.21"
+var version = "0.1.22"
 
 func main() {
 	const defaultConfig = "config.toml"
