@@ -717,7 +717,9 @@ targets = ["openai/real-model"]
 }
 
 // A direct request for a Gemini model path that climbs out of models/ fails as
-// an unknown model, and the router's key never reaches the backend.
+// an unknown model, and the router's key never reaches the backend. Nothing
+// was sent, so the key is not blacked out, and asking again within the window
+// still gets the 404 rather than an exhausted 502.
 func TestGeminiPathModelSendsNothing(t *testing.T) {
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -734,9 +736,16 @@ base_url = %q
 keys = ["gk"]
 `, srv.URL))
 
-	res := New(cfg).Execute(context.Background(), provider.OpChat, "google/../x", chatReq())
-	if res.Success || res.Status != http.StatusNotFound {
-		t.Errorf("success=%v status=%d, want a failed 404; attempts=%+v", res.Success, res.Status, res.Attempts)
+	r := New(cfg)
+	for i := 1; i <= 2; i++ {
+		res := r.Execute(context.Background(), provider.OpChat, "google/../x", chatReq())
+		if res.Success || res.Status != http.StatusNotFound || !strings.Contains(string(res.Body), `"model_not_found"`) {
+			t.Errorf("request %d: success=%v status=%d body=%s, want a failed 404 model_not_found; attempts=%+v",
+				i, res.Success, res.Status, res.Body, res.Attempts)
+		}
+		if r.blackout.Blocked("gk", "../x") {
+			t.Errorf("request %d: a refusal that sent nothing blacked out the key", i)
+		}
 	}
 	if n := hits.Load(); n != 0 {
 		t.Errorf("backend hits = %d, want 0", n)

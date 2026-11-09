@@ -20,6 +20,7 @@ type Blackout struct {
 	mu    sync.Mutex
 	until map[blackoutKey]time.Time
 	dur   time.Duration
+	swept int // len(until) after the last sweep
 }
 
 // NewBlackout creates a tracker with the given global blackout duration.
@@ -35,10 +36,9 @@ func (b *Blackout) SetDuration(d time.Duration) {
 }
 
 // Fail marks an (API key, model) combination as blacked out for the configured
-// duration, then removes every entry whose window has passed. Blocked removes
-// only the pair it looks up, so without this sweep a model name that is never
-// asked about again would stay forever; with it the map holds only the pairs
-// that failed within the last blackout window.
+// duration. Blocked removes only the pair it looks up, so Fail also sweeps out
+// expired entries; otherwise a model name that is never asked about again
+// would stay forever.
 func (b *Blackout) Fail(key, model string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -47,11 +47,22 @@ func (b *Blackout) Fail(key, model string) {
 	}
 	now := time.Now()
 	b.until[blackoutKey{key: key, model: model}] = now.Add(b.dur)
+	// Sweep only once the map has doubled since the last sweep. A sweep walks
+	// the whole map under the lock every key selection takes, so sweeping on
+	// every Fail costs time that grows with the square of a flood's rate (1.06
+	// ms per Fail at 100k entries). Doubling makes each sweep follow at least
+	// as many Fails as half the entries it walks, so a Fail costs O(1) on
+	// average, and the map holds at most twice the entries live at the last
+	// sweep.
+	if len(b.until) < 2*b.swept {
+		return
+	}
 	for bk, t := range b.until {
 		if now.After(t) {
 			delete(b.until, bk)
 		}
 	}
+	b.swept = len(b.until)
 }
 
 // Success removes an (API key, model) combination from the blackout list.

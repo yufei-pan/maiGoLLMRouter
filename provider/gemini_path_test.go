@@ -13,7 +13,8 @@ import (
 
 // A Gemini model name goes into the URL path, so one that would leave
 // models/ (a ".." segment) or change what the URL means (?, #, %) is refused
-// as an unknown model, and nothing is sent with the provider's key.
+// as an unknown model, and nothing is sent with the provider's key. Since
+// nothing was sent, the refusal says nothing about the key's health.
 func TestGeminiModelPathRefused(t *testing.T) {
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -27,18 +28,18 @@ func TestGeminiModelPathRefused(t *testing.T) {
 	for _, model := range []string{"../x", "a/../b", "..", "models/../files", "x?alt=1", "x#y", "x%2e%2e"} {
 		req := Request{Op: OpChat, Model: model, Body: body}
 		resp, err := Call(ctx, srv.Client(), "gemini", srv.URL, "k", req)
-		if err != nil || resp == nil || resp.HTTPStatus != http.StatusNotFound ||
+		if err != nil || resp == nil || resp.HTTPStatus != http.StatusNotFound || !resp.NoBlackout ||
 			!strings.Contains(string(resp.OpenAIBody), `"model_not_found"`) {
-			t.Errorf("Call(%q) = %s, %v; want a 404 model_not_found", model, statusAndBody(resp), err)
+			t.Errorf("Call(%q) = %s, %v; want a 404 model_not_found with NoBlackout", model, statusAndBody(resp), err)
 		}
 		stream, sresp, err := CallStream(ctx, srv.Client(), "gemini", srv.URL, "k", time.Minute, req)
 		if stream != nil {
 			stream.Close()
 			t.Errorf("CallStream(%q) opened a stream", model)
 		}
-		if err != nil || sresp == nil || sresp.HTTPStatus != http.StatusNotFound ||
+		if err != nil || sresp == nil || sresp.HTTPStatus != http.StatusNotFound || !sresp.NoBlackout ||
 			!strings.Contains(string(sresp.OpenAIBody), `"model_not_found"`) {
-			t.Errorf("CallStream(%q) = %s, %v; want a 404 model_not_found", model, statusAndBody(sresp), err)
+			t.Errorf("CallStream(%q) = %s, %v; want a 404 model_not_found with NoBlackout", model, statusAndBody(sresp), err)
 		}
 	}
 	if n := hits.Load(); n != 0 {
@@ -72,5 +73,5 @@ func statusAndBody(r *Response) string {
 	if r == nil {
 		return "nil"
 	}
-	return fmt.Sprintf("status %d body %s", r.HTTPStatus, r.OpenAIBody)
+	return fmt.Sprintf("status %d no_blackout %v body %s", r.HTTPStatus, r.NoBlackout, r.OpenAIBody)
 }

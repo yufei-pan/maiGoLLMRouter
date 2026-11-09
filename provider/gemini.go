@@ -70,11 +70,12 @@ func validGeminiModel(model string) bool {
 }
 
 // geminiModelNotFound answers a model that validGeminiModel refuses, without
-// sending anything: a 404 the router judges like any unknown model's.
+// sending anything: a 404 the router judges like any unknown model's. Nothing
+// reached the provider, so it says nothing about the key's health.
 func geminiModelNotFound(model string) *Response {
 	msg := mustJSON(fmt.Sprintf("model not found: %q", model))
 	b := []byte(`{"error":{"message":` + string(msg) + `,"type":"invalid_request_error","code":"model_not_found"}}`)
-	return &Response{HTTPStatus: http.StatusNotFound, RawResponse: b, OpenAIBody: b}
+	return &Response{HTTPStatus: http.StatusNotFound, RawResponse: b, OpenAIBody: b, NoBlackout: true}
 }
 
 func geminiChat(ctx context.Context, client *http.Client, baseURL, apiKey string, req Request) (*Response, error) {
