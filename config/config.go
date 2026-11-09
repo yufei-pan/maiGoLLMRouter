@@ -59,6 +59,7 @@ type Config struct {
 // Server holds top-level server settings.
 type Server struct {
 	Listen         string
+	APIListen      string // a second address serving only /v1/... and /healthz, never the UI; "" = no second listener
 	LogDir         string
 	LogRetention   time.Duration // detail logs older than this are deleted; 0 disables
 	ClientKeys     []string
@@ -186,6 +187,7 @@ type rawConfig struct {
 
 type rawServer struct {
 	Listen            string   `toml:"listen"`
+	APIListen         string   `toml:"api_listen"`
 	LogDir            string   `toml:"log_dir"`
 	LogRetentionDays  *int     `toml:"log_retention_days"`
 	ClientKeys        []string `toml:"client_keys"`
@@ -240,10 +242,12 @@ func Load(path string) (*Config, error) {
 	if _, err := toml.DecodeFile(path, &raw); err != nil {
 		return nil, fmt.Errorf("decode config: %w", err)
 	}
-	return build(raw)
+	return build(raw, "")
 }
 
-func build(raw rawConfig) (*Config, error) {
+// build resolves and validates raw. When raw lists no client keys, generated
+// becomes the only key; "" generates a new one.
+func build(raw rawConfig, generated string) (*Config, error) {
 	cfg := &Config{
 		Providers: make(map[string]*Provider),
 		Models:    make(map[string]ModelRoute),
@@ -252,6 +256,7 @@ func build(raw rawConfig) (*Config, error) {
 	// Server section with defaults.
 	srv := Server{
 		Listen:      firstNonEmpty(raw.Server.Listen, DefaultListen),
+		APIListen:   strings.TrimSpace(raw.Server.APIListen),
 		LogDir:      firstNonEmpty(raw.Server.LogDir, DefaultLogDir),
 		ClientKeys:  raw.Server.ClientKeys,
 		MaxRetries:  raw.Server.MaxRetries,
@@ -261,12 +266,15 @@ func build(raw rawConfig) (*Config, error) {
 	// When no client keys are configured, generate a random one so the inbound
 	// API is secured by default rather than left open.
 	if len(srv.ClientKeys) == 0 {
-		key, err := generateClientKey()
-		if err != nil {
-			return nil, fmt.Errorf("generate client key: %w", err)
+		if generated == "" {
+			key, err := generateClientKey()
+			if err != nil {
+				return nil, fmt.Errorf("generate client key: %w", err)
+			}
+			generated = key
 		}
-		srv.ClientKeys = []string{key}
-		srv.GeneratedClientKey = key
+		srv.ClientKeys = []string{generated}
+		srv.GeneratedClientKey = generated
 	}
 	if srv.MaxRetries < 0 {
 		srv.MaxRetries = 0

@@ -411,6 +411,33 @@ streaming = false
 	}
 }
 
+func TestAPIListenLoads(t *testing.T) {
+	for _, v := range []string{`"127.0.0.1:8471"`, `" 127.0.0.1:8471 "`} {
+		cfg, err := Load(writeTemp(t, `
+[server]
+client_keys = ["k"]
+api_listen = `+v+`
+`))
+		if err != nil {
+			t.Fatalf("load %s: %v", v, err)
+		}
+		if cfg.Server.APIListen != "127.0.0.1:8471" {
+			t.Errorf("api_listen = %s gives %q, want 127.0.0.1:8471", v, cfg.Server.APIListen)
+		}
+	}
+
+	cfg, err := Load(writeTemp(t, `
+[server]
+client_keys = ["k"]
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Server.APIListen != "" {
+		t.Errorf("api_listen unset should mean no second listener, got %q", cfg.Server.APIListen)
+	}
+}
+
 func TestAudioServerDefaults(t *testing.T) {
 	cfg, err := Load(writeTemp(t, `
 [server]

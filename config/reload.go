@@ -6,22 +6,18 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-// Reload reads the config file at path. When the file leaves client_keys empty,
-// keys from prev are kept so a generated startup key is not replaced on reload.
+// Reload reads the config file at path. When the file leaves client_keys
+// empty, the key prev generated stays the only key, so a reload doesn't change
+// it. Keys that came from the file are gone once the file no longer lists
+// them: with no generated key in prev, a new one is generated.
 func Reload(path string, prev *Config) (*Config, error) {
 	var raw rawConfig
 	if _, err := toml.DecodeFile(path, &raw); err != nil {
 		return nil, fmt.Errorf("decode config: %w", err)
 	}
-	if len(raw.Server.ClientKeys) == 0 && prev != nil && len(prev.Server.ClientKeys) > 0 {
-		raw.Server.ClientKeys = append([]string(nil), prev.Server.ClientKeys...)
+	generated := ""
+	if prev != nil {
+		generated = prev.Server.GeneratedClientKey
 	}
-	cfg, err := build(raw)
-	if err != nil {
-		return nil, err
-	}
-	if len(raw.Server.ClientKeys) == 0 && prev != nil && len(prev.Server.ClientKeys) > 0 {
-		cfg.Server.GeneratedClientKey = ""
-	}
-	return cfg, nil
+	return build(raw, generated)
 }

@@ -2,7 +2,10 @@
 # Copy to config.toml and edit. Run with: ./maiGoLLMRouter -config config.toml
 
 [server]
-listen = ":8470"
+listen = ":8470"                 # everything: API, /healthz and the web UI
+# A second address serving only the API (/v1/...) and /healthz, never the web
+# UI. Point an internet-facing proxy here. Unset: no second listener.
+# api_listen = "127.0.0.1:8471"
 log_dir = "./logs"
 
 # How long to keep per-request detail log files (./logs/YYYY-MM/DD/<id>.json.zst)
