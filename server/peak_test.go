@@ -24,17 +24,18 @@ import (
 // empty items, which costs the most memory per byte once decoded, with an
 // audio clip (so the log scrub runs) and a trailing assistant turn (so the
 // coercion copy runs). The value cap now refuses that body right after it is
-// decoded. A "-capped" suffix sends cappedBody instead, the costliest shape the
-// cap lets through. Set ROUTER_MEASURE_PEAK=<chat|responses>-<openai|anthropic|
-// gemini>[-capped] to run one case; each case needs its own process, because
-// VmHWM only rises.
+// decoded. Two suffixes send bodies the cap lets through: "-capped" sends
+// cappedBody, the costliest shape of plain messages, and "-args" sends
+// argsBody, whose tool call arguments conversion parses past the cap. Set
+// ROUTER_MEASURE_PEAK=<chat|responses>-<openai|anthropic|gemini>[-capped|-args]
+// to run one case; each case needs its own process, because VmHWM only rises.
 func TestMeasureWorstBodyPeak(t *testing.T) {
 	c := os.Getenv("ROUTER_MEASURE_PEAK")
 	if c == "" {
-		t.Skip("set ROUTER_MEASURE_PEAK=<chat|responses>-<openai|anthropic|gemini>[-capped] to measure one case")
+		t.Skip("set ROUTER_MEASURE_PEAK=<chat|responses>-<openai|anthropic|gemini>[-capped|-args] to measure one case")
 	}
-	shape, capped := strings.CutSuffix(c, "-capped")
-	endpoint, kind, _ := strings.Cut(shape, "-")
+	endpoint, rest, _ := strings.Cut(c, "-")
+	kind, variant, _ := strings.Cut(rest, "-")
 	paths := map[string]string{"chat": "/v1/chat/completions", "responses": "/v1/responses"}
 	fields := map[string]string{"chat": "messages", "responses": "input"}
 	replies := map[string]string{
@@ -43,8 +44,16 @@ func TestMeasureWorstBodyPeak(t *testing.T) {
 		"gemini":    `{"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}]}`,
 	}
 	path, reply := paths[endpoint], replies[kind]
-	if path == "" || reply == "" {
-		t.Fatalf("ROUTER_MEASURE_PEAK=%q: want <chat|responses>-<openai|anthropic|gemini>[-capped]", c)
+	bodies := map[string]func() string{
+		"": func() string { return worstBody(fields[endpoint], 32<<20) },
+		// A Responses request translated to Chat must be portable, and an
+		// input_audio part isn't, so only the direct cases keep the clip.
+		"capped": func() string { return cappedBody(fields[endpoint], 32<<20, endpoint == "chat" || kind == "openai") },
+		"args":   func() string { return argsBody(endpoint, 32<<20) },
+	}
+	makeBody := bodies[variant]
+	if path == "" || reply == "" || makeBody == nil {
+		t.Fatalf("ROUTER_MEASURE_PEAK=%q: want <chat|responses>-<openai|anthropic|gemini>[-capped|-args]", c)
 	}
 	if endpoint == "responses" && kind == "openai" {
 		reply = `{"id":"r1","object":"response","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}`
@@ -88,12 +97,7 @@ targets = ["%s/real"]
 	ts := httptest.NewServer(srv.WithCORS(mux))
 	defer ts.Close()
 
-	body := worstBody(fields[endpoint], 32<<20)
-	if capped {
-		// A Responses request translated to Chat must be portable, and an
-		// input_audio part isn't, so only the direct cases keep the clip.
-		body = cappedBody(fields[endpoint], 32<<20, endpoint == "chat" || kind == "openai")
-	}
+	body := makeBody()
 	runtime.GC()
 	before := vmHWM(t)
 	resp := post(t, ts, path, body)
@@ -136,9 +140,12 @@ func worstBody(field string, limit int) string {
 }
 
 // cappedBody is a request with as many {"role":"user","content":…} items (3
-// JSON values each) as fit under maxBodyValues, their content padded so the
-// body is just under limit bytes, then the audio clip when clip is set and a
-// trailing assistant turn.
+// JSON values each) as fit under maxBodyValues, their content padded with "<"
+// so the body is just under limit bytes, then the audio clip when clip is set
+// and a trailing assistant turn. "<" is one byte in the body but six
+// ("\u003c") in every copy json.Marshal makes of it: the body sent upstream
+// and the log entry. Measured 2026-11-09, it costs ~3x what "x" does and more
+// than invalid UTF-8, which decodes to a three-byte U+FFFD.
 func cappedBody(field string, limit int, clip bool) string {
 	head := `{"model":"m","` + field + `":[` // 3 values: the object, "m", the array
 	tail, fixed := assistantTurn+"]}", 3+3
@@ -147,7 +154,7 @@ func cappedBody(field string, limit int, clip bool) string {
 	}
 	n := (maxBodyValues - fixed) / 3
 	open, end := `{"role":"user","content":"`, `"},`
-	pad := strings.Repeat("x", (limit-1-len(head)-len(tail)-n*len(open+end))/n)
+	pad := strings.Repeat("<", (limit-1-len(head)-len(tail)-n*len(open+end))/n)
 	var b strings.Builder
 	b.Grow(limit)
 	b.WriteString(head)
@@ -155,6 +162,30 @@ func cappedBody(field string, limit int, clip bool) string {
 		b.WriteString(open)
 		b.WriteString(pad)
 		b.WriteString(end)
+	}
+	b.WriteString(tail)
+	return b.String()
+}
+
+// argsBody is a request of under 25 JSON values: a user turn, an assistant
+// tool call whose arguments string holds ~11 million empty objects as JSON
+// text, the tool's result and a user turn. Anthropic and Gemini conversion
+// parse the arguments into Go maps, which the value cap never counts. On those
+// kinds this tree measured costlier (2026-11-09) than arguments of one long
+// "<" string.
+func argsBody(endpoint string, limit int) string {
+	head := `{"model":"m","messages":[{"role":"user","content":"call f"},{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{\"a\":[`
+	tail := `{}]}"}}]},{"role":"tool","tool_call_id":"c1","content":"ok"},{"role":"user","content":"go on"}]}`
+	if endpoint == "responses" {
+		head = `{"model":"m","input":[{"role":"user","content":"call f"},{"type":"function_call","call_id":"c1","name":"f","arguments":"{\"a\":[`
+		tail = `{}]}"},{"type":"function_call_output","call_id":"c1","output":"ok"},{"role":"user","content":"go on"}]}`
+	}
+	n := (limit - 1 - len(head) - len(tail)) / len("{},")
+	var b strings.Builder
+	b.Grow(len(head) + n*len("{},") + len(tail))
+	b.WriteString(head)
+	for range n {
+		b.WriteString("{},")
 	}
 	b.WriteString(tail)
 	return b.String()
