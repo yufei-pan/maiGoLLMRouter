@@ -21,3 +21,9 @@ Reviewers read this file first, and raise an entry again only with new evidence 
 - **What the operator sees:** a browser on the LAN or VPN that can reach `listen`, visiting a hostile page, could be used to read the UI: the page points its own host name at the router's address, and `/ui/logs`, `/ui/logs/entry` and `/ui/inflight` answer it with logged prompts and replies and the live requests.
 - **Why:** the UI has no sign-in (decision 2) and is served only on `listen`, off the internet, so the attack needs a browser on that network and a page made for this router.
 - **Revisit when:** the next version. The fix is a `Host` check on UI routes.
+
+### Transcription conversion timeout answered as unreadable audio
+- **Kind:** deferred, to the next version.
+- **What the operator sees:** when stepfun transcription's ffmpeg conversion ends because the request's context did (a wait for a conversion slot, or a conversion that outlasts `audio_timeout`, under a flood of conversions), the client gets 400 "this provider can't read <format> audio" (`provider/transcription.go`), not a busy or timeout answer.
+- **Why:** the correct answer depends on how the router treats an attempt that ran out of time (blackout, the next target), which this change doesn't touch.
+- **Revisit when:** the next version.

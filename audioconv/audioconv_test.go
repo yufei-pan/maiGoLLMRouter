@@ -230,24 +230,42 @@ func withSlots(t *testing.T, n int) {
 }
 
 // TestConvertBoundsConcurrentRuns verifies no more than the slot count of
-// ffmpeg processes run at once: each fake ffmpeg records how many are alive
-// when it starts, then lives long enough for the others to overlap it.
+// ffmpeg processes run at once. Each fake ffmpeg records how many are alive
+// when it starts, then stays alive until the test releases it, so the runs
+// overlap however loaded the host is: the test waits for every slot to be
+// taken, checks the extra Convert starts nothing, and only then lets go.
 func TestConvertBoundsConcurrentRuns(t *testing.T) {
 	const slots = 2
 	withSlots(t, slots)
-	dir, logPath := t.TempDir(), t.TempDir()+"/counts"
+	runs, ctl := t.TempDir(), t.TempDir() // a run file per live fake; the release file and the counts
+	release, logPath := ctl+"/release", ctl+"/counts"
+	// 1000 polls of 10 ms cap a fake at about 10 s, so a broken test can't hang.
 	script := fmt.Sprintf(`#!/bin/sh
 touch %[1]s/run.$$
 ls %[1]s | wc -l >> %[2]s
-sleep 0.3
+i=0
+while [ ! -e %[3]s ] && [ $i -lt 1000 ]; do sleep 0.01; i=$((i+1)); done
 rm -f %[1]s/run.$$
 echo audio
-`, dir, logPath)
+`, runs, logPath, release)
 	fake := t.TempDir() + "/ffmpeg"
 	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	running := func() int {
+		entries, err := os.ReadDir(runs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(entries)
+	}
+
 	var wg sync.WaitGroup
+	// However the test ends, let the fakes go and wait for the Converts.
+	defer func() {
+		os.WriteFile(release, nil, 0o600)
+		wg.Wait()
+	}()
 	for range slots + 1 {
 		wg.Add(1)
 		go func() {
@@ -257,18 +275,36 @@ echo audio
 			}
 		}()
 	}
+
+	// 1. Every slot gets a run.
+	for deadline := time.Now().Add(10 * time.Second); running() < slots; time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d of %d ffmpeg runs started within 10 s", running(), slots)
+		}
+	}
+	// 2. The extra Convert waits: no further run shows up while the slots are full.
+	for end := time.Now().Add(200 * time.Millisecond); time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
+		if n := running(); n != slots {
+			t.Fatalf("%d ffmpeg runs alive while all %d slots were busy", n, slots)
+		}
+	}
+	// 3 and 4. Release the fakes and wait for every Convert.
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	wg.Wait()
+
 	raw, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	peak, runs := 0, 0
+	peak, started := 0, 0
 	for _, line := range strings.Fields(string(raw)) {
 		n, _ := strconv.Atoi(line)
-		peak, runs = max(peak, n), runs+1
+		peak, started = max(peak, n), started+1
 	}
-	if runs != slots+1 {
-		t.Errorf("%d runs recorded, want %d", runs, slots+1)
+	if started != slots+1 {
+		t.Errorf("%d runs recorded, want %d", started, slots+1)
 	}
 	if peak != slots {
 		t.Errorf("peak of %d ffmpeg alive at once, want exactly %d", peak, slots)

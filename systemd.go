@@ -18,8 +18,10 @@ type systemdUnitParams struct {
 	ExecPath         string // absolute binary path
 	WorkingDirectory string
 	ConfigPath       string
-	LogDir           string // absolute; "" when the config could not be read
-	FFmpeg           string // the config's ffmpeg value
+	LogDir           string // absolute, symlinks resolved; "" when the config could not be read
+	LogDirAsWritten  string // LogDir as the service opens it: the config's value, made absolute but not resolved
+	FFmpeg           string // the config's ffmpeg value, symlinks resolved when it is absolute
+	FFmpegAsWritten  string // the config's ffmpeg value
 	ConfigError      string // why the config could not be read; "" when it was
 	User             string
 	Group            string
@@ -44,11 +46,15 @@ func underHome(path string) bool {
 // protectHome is the unit's ProtectHome= value: "yes" hides the home
 // directories, so anything the service uses there (a binary there fails with
 // 203/EXEC) needs "read-only" instead. A bare ffmpeg is found on systemd's
-// PATH, which has no home directory.
+// PATH, which has no home directory. The log directory and ffmpeg are judged
+// as the config writes them as well as resolved: the service opens them as
+// written, and a link out of a home directory is empty once that is hidden.
 func protectHome(p systemdUnitParams) string {
-	paths := []string{p.ExecPath, p.WorkingDirectory, p.ConfigPath, p.LogDir}
-	if filepath.IsAbs(p.FFmpeg) {
-		paths = append(paths, p.FFmpeg)
+	paths := []string{p.ExecPath, p.WorkingDirectory, p.ConfigPath, p.LogDir, p.LogDirAsWritten}
+	for _, ffmpeg := range []string{p.FFmpeg, p.FFmpegAsWritten} {
+		if filepath.IsAbs(ffmpeg) {
+			paths = append(paths, ffmpeg)
+		}
 	}
 	for _, path := range paths {
 		if underHome(path) {
@@ -108,7 +114,13 @@ func resolveSystemdParams(configPath string) (systemdUnitParams, error) {
 		return systemdUnitParams{}, fmt.Errorf("config path: %w", err)
 	}
 
-	workDir := filepath.Dir(cfgAbs)
+	// A config file that is itself a link keeps the link's directory: the
+	// router was run there, and its relative log_dir points there. Only
+	// -config names the real file.
+	workDir, err := resolvePath(filepath.Dir(configPath))
+	if err != nil {
+		return systemdUnitParams{}, fmt.Errorf("working directory: %w", err)
+	}
 
 	u, err := user.Current()
 	username := ""
@@ -143,7 +155,7 @@ func resolveSystemdParams(configPath string) (systemdUnitParams, error) {
 		p.ConfigError = err.Error()
 		return p, nil
 	}
-	p.FFmpeg = cfg.Server.FFmpeg
+	p.FFmpeg, p.FFmpegAsWritten = cfg.Server.FFmpeg, cfg.Server.FFmpeg
 	if filepath.IsAbs(p.FFmpeg) {
 		if p.FFmpeg, err = resolvePath(p.FFmpeg); err != nil {
 			return systemdUnitParams{}, fmt.Errorf("ffmpeg path: %w", err)
@@ -154,6 +166,7 @@ func resolveSystemdParams(configPath string) (systemdUnitParams, error) {
 	if !filepath.IsAbs(logDir) {
 		logDir = filepath.Join(workDir, logDir)
 	}
+	p.LogDirAsWritten = logDir
 	if p.LogDir, err = resolvePath(logDir); err != nil {
 		return systemdUnitParams{}, fmt.Errorf("log directory: %w", err)
 	}

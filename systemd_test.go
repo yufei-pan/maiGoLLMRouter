@@ -167,6 +167,8 @@ func TestProtectHomeChoice(t *testing.T) {
 		{"config under /root", func(p *systemdUnitParams) { p.ConfigPath = "/root/x/config.toml" }, "read-only"},
 		{"log dir under /home", func(p *systemdUnitParams) { p.LogDir = "/home/u/logs" }, "read-only"},
 		{"ffmpeg under /home", func(p *systemdUnitParams) { p.FFmpeg = "/home/u/ffmpeg" }, "read-only"},
+		{"log dir as written under /root, resolved elsewhere", func(p *systemdUnitParams) { p.LogDirAsWritten = "/root/x/logs" }, "read-only"},
+		{"ffmpeg as written under /home, resolved elsewhere", func(p *systemdUnitParams) { p.FFmpegAsWritten = "/home/u/ffmpeg" }, "read-only"},
 		{"bare ffmpeg", func(p *systemdUnitParams) { p.FFmpeg = "ffmpeg" }, "yes"},
 		{"binary under /homework", func(p *systemdUnitParams) { p.ExecPath = "/homework/r" }, "yes"},
 	}
@@ -176,6 +178,65 @@ func TestProtectHomeChoice(t *testing.T) {
 			tc.edit(&p)
 			if got := protectHome(p); got != tc.want {
 				t.Errorf("protectHome(%+v) = %q, want %q", p, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestProtectHomeJudgesPathsAsWritten verifies ProtectHome= is judged from the
+// log_dir and ffmpeg as the config writes them as well as from their real
+// paths: the service opens them as written, and a link from a home directory
+// to a disk elsewhere leaves nothing behind it once the home directories are
+// hidden.
+func TestProtectHomeJudgesPathsAsWritten(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(root, "home") // stands in for /home
+	disk, etc := filepath.Join(root, "disk"), filepath.Join(root, "etc")
+	for _, d := range []string{home, disk, etc} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// home/x and home/ffmpeg are links out of home, to files on another disk.
+	if err := os.Symlink(disk, filepath.Join(home, "x")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(disk, "ffmpeg"), nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(disk, "ffmpeg"), filepath.Join(home, "ffmpeg")); err != nil {
+		t.Fatal(err)
+	}
+	old := homeDirs
+	homeDirs = []string{home}
+	t.Cleanup(func() { homeDirs = old })
+
+	for _, tc := range []struct{ name, logDir, ffmpeg, want string }{
+		{"log_dir written under home, really elsewhere", filepath.Join(home, "x", "logs"), "ffmpeg", "read-only"},
+		{"ffmpeg written under home, really elsewhere", filepath.Join(disk, "logs"), filepath.Join(home, "ffmpeg"), "read-only"},
+		{"nothing under home", filepath.Join(disk, "logs"), filepath.Join(disk, "ffmpeg"), "yes"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfgPath := filepath.Join(etc, "config.toml")
+			rewriteConfig(t, cfgPath, fmt.Sprintf("[server]\nclient_keys = [\"sk-test\"]\nlog_dir = %q\nffmpeg = %q\n", tc.logDir, tc.ffmpeg))
+			p, err := resolveSystemdParams(cfgPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if underHome(p.LogDir) || underHome(p.FFmpeg) {
+				t.Fatalf("setup: the resolved paths %q and %q should be outside home", p.LogDir, p.FFmpeg)
+			}
+			unit := renderSystemdUnit(p)
+			lines := unitLines(unit)
+			if !slices.Contains(lines, "ProtectHome="+tc.want) {
+				t.Errorf("want ProtectHome=%s:\n%s", tc.want, unit)
+			}
+			// systemd resolves ReadWritePaths= on the host: the real path stays.
+			if !slices.Contains(lines, "ReadWritePaths="+filepath.Join(disk, "logs")) {
+				t.Errorf("ReadWritePaths= is not the resolved log dir:\n%s", unit)
 			}
 		})
 	}
@@ -286,6 +347,56 @@ func TestGenerateResolvesSymlinks(t *testing.T) {
 			}
 			if !slices.Contains(unitLines(unit), "ProtectHome=read-only") {
 				t.Errorf("ProtectHome was not judged from the real paths:\n%s", unit)
+			}
+		})
+	}
+}
+
+// TestGenerateKeepsConfigLinkDir verifies a config file that is itself a link
+// keeps its own directory as the working directory, where the router was run
+// and where its relative log_dir points; only -config names the real file.
+func TestGenerateKeepsConfigLinkDir(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, b := filepath.Join(root, "a"), filepath.Join(root, "b")
+	for _, d := range []string{a, b} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	realCfg := filepath.Join(b, "real.toml")
+	rewriteConfig(t, realCfg, "[server]\nclient_keys = [\"sk-test\"]\nlog_dir = \"logs\"\n")
+	if err := os.Symlink(realCfg, filepath.Join(a, "config.toml")); err != nil {
+		t.Fatal(err)
+	}
+	aLink := filepath.Join(root, "alink") // a itself reached through a link
+	if err := os.Symlink(a, aLink); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, cfgPath := range map[string]string{
+		"config link in a real directory":   filepath.Join(a, "config.toml"),
+		"config link in a linked directory": filepath.Join(aLink, "config.toml"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			p, err := resolveSystemdParams(cfgPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			unit := renderSystemdUnit(p)
+			lines := unitLines(unit)
+			for _, want := range []string{
+				"WorkingDirectory=" + a,
+				"ReadWritePaths=" + filepath.Join(a, "logs"),
+			} {
+				if !slices.Contains(lines, want) {
+					t.Errorf("unit lacks %q:\n%s", want, unit)
+				}
+			}
+			if p.ConfigPath != realCfg || !strings.HasSuffix(p.ExecStart, " -config "+realCfg) {
+				t.Errorf("-config should name the real file %s: ConfigPath %q, ExecStart %q", realCfg, p.ConfigPath, p.ExecStart)
 			}
 		})
 	}
