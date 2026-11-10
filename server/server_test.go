@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -379,5 +380,36 @@ func TestAudioChatLogScrubbedFromBody(t *testing.T) {
 	}
 	if got := logs.Recent()[0].RequestPreview; got != "what is this" {
 		t.Errorf("index preview %q, want %q", got, "what is this")
+	}
+}
+
+// The log and the index preview hold the request as the client sent it, not
+// the copy coercion rewrites for the provider.
+func TestLogKeepsRequestBeforeCoercion(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}]}`)
+	}))
+	defer backend.Close()
+	send := func(messages string) (*logstore.Store, map[string]any) {
+		logs, err := logstore.New(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		ts := audioServer(t, "coerce_trailing_assistant = true", openAIBlock(backend.URL), logs)
+		resp := post(t, ts, "/v1/chat/completions", `{"model":"m","messages":`+messages+`}`)
+		_, _ = io.ReadAll(resp.Body)
+		return logs, lastLog(t, logs)
+	}
+
+	_, entry := send(`[{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"QUJD","format":"wav"}}]},{"role":"assistant","content":"I am"}]`)
+	req, _ := entry["request"].(map[string]any)
+	msgs, _ := req["messages"].([]any)
+	if len(msgs) != 2 || !reflect.DeepEqual(msgs[1], map[string]any{"role": "assistant", "content": "I am"}) {
+		t.Errorf("logged messages = %v, want the last one as sent", msgs)
+	}
+
+	logs, _ := send(`[{"role":"assistant","content":"I said"}]`)
+	if got := logs.Recent()[0].RequestPreview; got != "I said" {
+		t.Errorf("index preview %q, want %q", got, "I said")
 	}
 }

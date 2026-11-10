@@ -23,15 +23,18 @@ import (
 // process's peak memory: a body just under the 32 MB cap made of ~11 million
 // empty items, which costs the most memory per byte once decoded, with an
 // audio clip (so the log scrub runs) and a trailing assistant turn (so the
-// coercion copy runs). Set ROUTER_MEASURE_PEAK=<chat|responses>-<openai|
-// anthropic|gemini> to run one case; each case needs its own process, because
+// coercion copy runs). The value cap now refuses that body right after it is
+// decoded. A "-capped" suffix sends cappedBody instead, the costliest shape the
+// cap lets through. Set ROUTER_MEASURE_PEAK=<chat|responses>-<openai|anthropic|
+// gemini>[-capped] to run one case; each case needs its own process, because
 // VmHWM only rises.
 func TestMeasureWorstBodyPeak(t *testing.T) {
 	c := os.Getenv("ROUTER_MEASURE_PEAK")
 	if c == "" {
-		t.Skip("set ROUTER_MEASURE_PEAK=<chat|responses>-<openai|anthropic|gemini> to measure one case")
+		t.Skip("set ROUTER_MEASURE_PEAK=<chat|responses>-<openai|anthropic|gemini>[-capped] to measure one case")
 	}
-	endpoint, kind, _ := strings.Cut(c, "-")
+	shape, capped := strings.CutSuffix(c, "-capped")
+	endpoint, kind, _ := strings.Cut(shape, "-")
 	paths := map[string]string{"chat": "/v1/chat/completions", "responses": "/v1/responses"}
 	fields := map[string]string{"chat": "messages", "responses": "input"}
 	replies := map[string]string{
@@ -41,7 +44,7 @@ func TestMeasureWorstBodyPeak(t *testing.T) {
 	}
 	path, reply := paths[endpoint], replies[kind]
 	if path == "" || reply == "" {
-		t.Fatalf("ROUTER_MEASURE_PEAK=%q: want <chat|responses>-<openai|anthropic|gemini>", c)
+		t.Fatalf("ROUTER_MEASURE_PEAK=%q: want <chat|responses>-<openai|anthropic|gemini>[-capped]", c)
 	}
 	if endpoint == "responses" && kind == "openai" {
 		reply = `{"id":"r1","object":"response","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}`
@@ -86,32 +89,72 @@ targets = ["%s/real"]
 	defer ts.Close()
 
 	body := worstBody(fields[endpoint], 32<<20)
+	if capped {
+		// A Responses request translated to Chat must be portable, and an
+		// input_audio part isn't, so only the direct cases keep the clip.
+		body = cappedBody(fields[endpoint], 32<<20, endpoint == "chat" || kind == "openai")
+	}
 	runtime.GC()
 	before := vmHWM(t)
 	resp := post(t, ts, path, body)
-	_, _ = io.Copy(io.Discard, resp.Body)
-	deadline := time.Now().Add(time.Minute)
-	for len(logs.Recent()) == 0 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if len(logs.Recent()) == 0 {
-		t.Fatal("the request was never logged, so its path did not finish")
+	_, _, code := apiError(t, resp) // reads the whole reply
+	// A refused request is never logged; its handler is done once it replies.
+	if code != "too_many_values" {
+		deadline := time.Now().Add(time.Minute)
+		for len(logs.Recent()) == 0 && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if len(logs.Recent()) == 0 {
+			t.Fatal("the request was never logged, so its path did not finish")
+		}
 	}
 	after := vmHWM(t)
-	t.Logf("PEAK case=%s body=%d delta_mib=%d status=%d upstream=%t", c, len(body), (after-before)>>20, resp.StatusCode, reached.Load())
+	t.Logf("PEAK case=%s body=%d delta_mib=%d status=%d code=%q upstream=%t", c, len(body), (after-before)>>20, resp.StatusCode, code, reached.Load())
 }
+
+// The turns that end a measured body: an audio clip (8 JSON values) and an
+// assistant turn (3).
+const (
+	clipTurn      = `{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"QUJD","format":"wav"}}]}`
+	assistantTurn = `{"role":"assistant","content":"x"}`
+)
 
 // worstBody is a request whose field holds empty items up to just under
 // limit bytes, then an audio clip and a trailing assistant turn.
 func worstBody(field string, limit int) string {
 	head := `{"model":"m","` + field + `":[`
-	tail := `{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"QUJD","format":"wav"}}]},{"role":"assistant","content":"x"}]}`
+	tail := clipTurn + "," + assistantTurn + "]}"
 	n := (limit - 1 - len(head) - len(tail)) / len("{},")
 	var b strings.Builder
 	b.Grow(len(head) + n*len("{},") + len(tail))
 	b.WriteString(head)
 	for range n {
 		b.WriteString("{},")
+	}
+	b.WriteString(tail)
+	return b.String()
+}
+
+// cappedBody is a request with as many {"role":"user","content":…} items (3
+// JSON values each) as fit under maxBodyValues, their content padded so the
+// body is just under limit bytes, then the audio clip when clip is set and a
+// trailing assistant turn.
+func cappedBody(field string, limit int, clip bool) string {
+	head := `{"model":"m","` + field + `":[` // 3 values: the object, "m", the array
+	tail, fixed := assistantTurn+"]}", 3+3
+	if clip {
+		tail, fixed = clipTurn+","+tail, fixed+8
+	}
+	n := (maxBodyValues - fixed) / 3
+	open, end := `{"role":"user","content":"`, `"},`
+	pad := strings.Repeat("x", (limit-1-len(head)-len(tail)-n*len(open+end))/n)
+	var b strings.Builder
+	b.Grow(limit)
+	b.WriteString(head)
+	for range n {
+		b.WriteString(open)
+		b.WriteString(pad)
+		b.WriteString(end)
 	}
 	b.WriteString(tail)
 	return b.String()

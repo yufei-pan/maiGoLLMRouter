@@ -61,6 +61,10 @@ func (s *Server) handleSpeech(w http.ResponseWriter, r *http.Request) {
 		writeCodedError(w, http.StatusBadRequest, msg, "invalid_request_error", "invalid_model")
 		return
 	}
+	if countExceeds(body, maxBodyValues) {
+		writeCodedError(w, http.StatusBadRequest, tooManyValuesMessage, "invalid_request_error", "too_many_values")
+		return
+	}
 	format := "mp3"
 	if v, given := body["response_format"]; given {
 		f, _ := v.(string)
@@ -135,6 +139,10 @@ func (s *Server) handleTranscription(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	model, tr, msg := readTranscription(w, r)
+	if msg == tooManyValuesMessage { // its one refusal that carries a code
+		writeCodedError(w, http.StatusBadRequest, msg, "invalid_request_error", "too_many_values")
+		return
+	}
 	if msg != "" {
 		writeError(w, http.StatusBadRequest, msg, "invalid_request_error")
 		return
@@ -206,6 +214,15 @@ func readTranscription(w http.ResponseWriter, r *http.Request) (string, provider
 		raw, err := io.ReadAll(io.LimitReader(r.Body, maxAudioRequest))
 		if err != nil {
 			return "", tr, "failed to read request body"
+		}
+		// Counted before the struct decode below, which would build any
+		// "temperature" tree a second time.
+		var doc any
+		if json.Unmarshal(raw, &doc) != nil {
+			return "", tr, "invalid JSON body"
+		}
+		if countExceeds(doc, maxBodyValues) {
+			return "", tr, tooManyValuesMessage
 		}
 		var body struct {
 			Model      string `json:"model"`

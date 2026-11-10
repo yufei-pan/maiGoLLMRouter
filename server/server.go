@@ -174,6 +174,10 @@ func (s *Server) handle(op provider.Operation) http.HandlerFunc {
 			writeCodedError(w, http.StatusBadRequest, msg, "invalid_request_error", "invalid_model")
 			return
 		}
+		if countExceeds(body, maxBodyValues) {
+			writeCodedError(w, http.StatusBadRequest, tooManyValuesMessage, "invalid_request_error", "too_many_values")
+			return
+		}
 
 		streamed := isStreamRequest(op, body)
 		orig := body // the request as sent: coercion returns a copy
