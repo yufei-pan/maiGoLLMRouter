@@ -51,11 +51,21 @@ func main() {
 	}
 
 	if generateSystemd {
-		outPath, err := writeSystemdUnit(configPath)
+		params, err := resolveSystemdParams(configPath)
+		if err != nil {
+			log.Fatalf("generate-systemd: %v", err)
+		}
+		outPath, err := writeSystemdUnit(params)
 		if err != nil {
 			log.Fatalf("generate-systemd: %v", err)
 		}
 		printSystemdInstallInstructions(outPath)
+		if notes := systemdNotes(params); len(notes) > 0 {
+			fmt.Println()
+			for _, note := range notes {
+				fmt.Println(note)
+			}
+		}
 		return
 	}
 
