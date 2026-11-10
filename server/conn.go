@@ -52,7 +52,6 @@ func NewHTTPServer(h http.Handler, lim ConnLimits) *http.Server {
 func withConnLimits(next http.Handler, lim ConnLimits) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rc := http.NewResponseController(w)
-		pw := &progressWriter{ResponseWriter: w, rc: rc, stall: lim.Write}
 		var body *eofBody
 		// ContentLength is -1 for a chunked body. A request without a body
 		// gets no deadline: its background read is already running, and a
@@ -63,18 +62,10 @@ func withConnLimits(next http.Handler, lim ConnLimits) http.Handler {
 			_ = rc.SetReadDeadline(time.Now().Add(lim.Body))
 			body = &eofBody{ReadCloser: r.Body}
 			r.Body = body
-			// Without full duplex, a reply whose header goes out mid-handler
-			// (past net/http's 2 KB buffer, or flushed) first drains an unread
-			// body (chunkWriter.writeHeader), around eofBody. A drain that
-			// reached EOF would start the background read that the
-			// unread-body deadline below then fails. Full duplex changes
-			// nothing else: finishRequest still drains after we return.
-			_ = rc.EnableFullDuplex()
 		}
+		pw := &progressWriter{ResponseWriter: w, rc: rc, stall: lim.Write, body: body}
 		if r.ContentLength > maxBody {
-			// Before auth, on every path: such a body can never succeed. Its
-			// connection can't be reused, as the body was never read.
-			pw.Header().Set("Connection", "close")
+			// Before auth, on every path: such a body can never succeed.
 			writeCodedError(pw, http.StatusRequestEntityTooLarge, bodyTooLargeMessage, "invalid_request_error", "body_too_large")
 		} else {
 			next.ServeHTTP(pw, r)
@@ -101,13 +92,43 @@ func withConnLimits(next http.Handler, lim ConnLimits) http.Handler {
 // cut off while a slow one still gets everything. A missed deadline fails the
 // write; net/http then records the error and cancels the request's context,
 // as for a client that went away (checkConnErrorWriter).
+//
+// A response header committed while the request body is unread says
+// Connection: close. That sets closeAfterReply before chunkWriter.writeHeader
+// runs, so net/http does not drain the body itself (server.go: the drain
+// needs !closeAfterReply). Such a drain goes around eofBody: one that
+// reached EOF mid-handler would start the background read that the
+// wrapper's unread-body deadline then fails. And the client learns that the
+// connection won't be reused, instead of sending its next request into a
+// closed one. A handler that writes nothing needs no commit here: its header
+// is written in finishRequest, after the unread-body deadline, where
+// net/http's own drain fails fast and says Connection: close itself.
 type progressWriter struct {
 	http.ResponseWriter
-	rc    *http.ResponseController // over the connection's own writer
-	stall time.Duration
+	rc        *http.ResponseController // over the connection's own writer
+	stall     time.Duration
+	body      *eofBody // nil for a request without a body
+	committed bool     // the response header has been committed
+}
+
+// commit runs as the response header is committed.
+func (pw *progressWriter) commit() {
+	if pw.committed {
+		return
+	}
+	pw.committed = true
+	if pw.body != nil && !pw.body.eof {
+		pw.Header().Set("Connection", "close")
+	}
+}
+
+func (pw *progressWriter) WriteHeader(code int) {
+	pw.commit()
+	pw.ResponseWriter.WriteHeader(code)
 }
 
 func (pw *progressWriter) Write(p []byte) (int, error) {
+	pw.commit() // a first Write commits the header, as WriteHeader(200)
 	if len(p) == 0 {
 		return pw.ResponseWriter.Write(p)
 	}
@@ -128,6 +149,7 @@ func (pw *progressWriter) Write(p []byte) (int, error) {
 // FlushError flushes under a fresh deadline. ResponseController prefers it to
 // Flush, so sseSink's flushes get one.
 func (pw *progressWriter) FlushError() error {
+	pw.commit() // a flush commits the header, as WriteHeader(200)
 	_ = pw.rc.SetWriteDeadline(time.Now().Add(pw.stall))
 	return pw.rc.Flush()
 }

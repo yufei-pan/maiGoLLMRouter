@@ -42,7 +42,9 @@ func (l testListener) Accept() (net.Conn, error) {
 // testConn yields for a moment after a read deadline at or before now, so the
 // background read that deadline fails runs first, as it may on a loaded host.
 // Without that, finishRequest's abortPendingRead usually marks the read
-// aborted before it runs, and hides what the deadline did.
+// aborted before it runs, and hides what the deadline did. The yield makes
+// that order likely, not certain: on a loaded host the woken read may still
+// run late, so a regression of that kind is caught by most runs, not all.
 type testConn struct{ *net.TCPConn }
 
 func (c testConn) SetReadDeadline(t time.Time) error {
@@ -227,41 +229,103 @@ func TestUnreadBodyClosesConn(t *testing.T) {
 			c := dialRaw(t, addr)
 			// The body is announced and never sent.
 			c.send(request(tc.method, tc.path, "", slices.Concat(tc.headers, []string{"Transfer-Encoding: chunked"})...))
-			if resp, body := c.response(time.Second); resp.StatusCode != tc.status {
+			resp, body := c.response(time.Second)
+			if resp.StatusCode != tc.status {
 				t.Fatalf("status %d %s, want %d", resp.StatusCode, body, tc.status)
+			}
+			if !resp.Close {
+				t.Error("the reply does not say Connection: close")
 			}
 			c.expectClosed(time.Second)
 		})
 	}
 }
 
-// A handler that answers past net/http's 2 KB response buffer without reading
-// the body (GET /v1/models with a long model list, a UI page) sends its header
-// mid-handler. net/http must not drain the body then, behind eofBody's back:
-// a drain that reached EOF would start the background read that the
-// wrapper's unread-body deadline then fails.
-func TestUnreadBodyLargeReplyKeepsContext(t *testing.T) {
+// A handler that answers past net/http's 2 KB response buffer (GET
+// /v1/models with a long model list, a UI page), or flushes, sends its header
+// mid-handler. With the body unread, the reply says Connection: close and the
+// connection closes: net/http must not drain the body itself then, around
+// eofBody, as a drain that reached EOF would start the background read that
+// the wrapper's unread-body deadline then fails, and the next request would
+// start cancelled. With the body read to EOF, the connection stays, with a
+// live context.
+func TestHeaderCommittedMidHandler(t *testing.T) {
 	addr := startServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/big" {
-			_, _ = w.Write(make([]byte, 8<<10))
+		q := r.URL.Query()
+		switch {
+		case r.URL.Path == "/ctx":
+			fmt.Fprint(w, r.Context().Err())
 			return
+		case q.Has("read"):
+			_, _ = io.ReadAll(r.Body)
+		case q.Has("flush"):
+			_ = http.NewResponseController(w).Flush()
+			_, _ = io.WriteString(w, "ok")
+			return
+		case q.Has("status"): // as handleModels does
+			w.WriteHeader(http.StatusOK)
 		}
-		fmt.Fprint(w, r.Context().Err())
+		_, _ = w.Write(make([]byte, 8<<10))
 	}), DefaultConnLimits)
-	c := dialRaw(t, addr)
-	c.send(request("POST", "/big", "hello", "Content-Length: 5"))
-	if resp, _ := c.response(time.Second); resp.StatusCode != 200 {
-		t.Fatalf("status %d", resp.StatusCode)
+
+	for _, tc := range []struct {
+		name, path string
+		read       bool
+	}{
+		{"unread, large reply", "/big", false},
+		{"unread, flushed first", "/big?flush=1", false},
+		{"unread, WriteHeader then large reply", "/big?status=1", false},
+		{"read, large reply", "/big?read=1", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := dialRaw(t, addr)
+			c.send(request("POST", tc.path, "hello", "Content-Length: 5"))
+			resp, _ := c.response(time.Second)
+			if resp.StatusCode != 200 || resp.Close == tc.read {
+				t.Fatalf("status %d, Connection: close %v; want 200 and close %v", resp.StatusCode, resp.Close, !tc.read)
+			}
+			if !tc.read {
+				c.expectClosed(time.Second)
+				return
+			}
+			c.send(request("GET", "/ctx", ""))
+			if _, body := c.response(time.Second); body != "<nil>" {
+				t.Errorf("the next request on the connection started with context error %q", body)
+			}
+		})
 	}
-	c.send(request("GET", "/ctx", ""))
-	_ = c.c.SetReadDeadline(time.Now().Add(time.Second))
-	resp, err := http.ReadResponse(c.br, nil)
-	if err != nil {
-		t.Logf("the connection closed: also fine (%v)", err)
-		return
+}
+
+// A client that reuses connections, as a reverse proxy in front of the router
+// does, must be told when a refusal closes one: a proxied body can't be
+// replayed, so a request sent into a connection the server is closing fails
+// with EOF instead of being retried.
+func TestRefusedUploadsReuseCleanly(t *testing.T) {
+	addr := startServer(t, fullHandler(t, nil), DefaultConnLimits)
+	client := &http.Client{Transport: &http.Transport{}}
+	t.Cleanup(client.CloseIdleConnections)
+	const n = 300 // the reviewer's repro failed ~6% of 600 when the close went unsaid
+	failed := 0
+	var last error
+	for range n {
+		// No GetBody: like a proxied body, it can't be replayed.
+		body := io.NopCloser(bytes.NewReader(make([]byte, 60_000)))
+		req, _ := http.NewRequest(http.MethodPost, "http://"+addr+"/v1/chat/completions", body)
+		req.ContentLength = 60_000
+		resp, err := client.Do(req) // no key: 401 without reading the body
+		if err != nil {
+			failed++
+			last = err
+			continue
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 401 {
+			t.Fatalf("status %d, want 401", resp.StatusCode)
+		}
 	}
-	if body, _ := io.ReadAll(resp.Body); string(body) != "<nil>" {
-		t.Errorf("the next request on the connection started with context error %q", body)
+	if failed > 0 {
+		t.Errorf("%d of %d requests failed (last: %v)", failed, n, last)
 	}
 }
 
@@ -424,6 +488,12 @@ func TestSlowReaderGetsAll(t *testing.T) {
 		_, _ = w.Write(want)
 	}), lim)
 	c := dialRaw(t, addr)
+	// A bounded receive buffer, so the whole-write case above fails here
+	// without depending on the kernel's autotuning. Not 16 KiB as in
+	// TestWriteStallCutsOff: a window under loopback's 64 KiB segment leaves
+	// the sender on persist-timer probes (200 ms and up), so a steady reader
+	// looks stalled (it failed 5 of 5 runs; 32 KiB and up passed).
+	_ = c.c.(*net.TCPConn).SetReadBuffer(64 << 10)
 	c.send(request("GET", "/", ""))
 	_ = c.c.SetReadDeadline(time.Now().Add(30 * time.Second))
 	resp, err := http.ReadResponse(c.br, nil)
@@ -495,7 +565,7 @@ func TestDeclaredSizeTooLarge(t *testing.T) {
 		Error struct{ Message, Type, Code string }
 	}
 	_ = json.Unmarshal([]byte(body), &e)
-	if resp.StatusCode != 413 || e.Error.Code != "body_too_large" || e.Error.Type != "invalid_request_error" || !strings.Contains(e.Error.Message, "32 MB") {
+	if resp.StatusCode != 413 || e.Error.Code != "body_too_large" || e.Error.Type != "invalid_request_error" || e.Error.Message != "request body is larger than 32 MB" {
 		t.Errorf("status %d %s", resp.StatusCode, body)
 	}
 	if !resp.Close {
@@ -504,8 +574,8 @@ func TestDeclaredSizeTooLarge(t *testing.T) {
 
 	c = dialRaw(t, addr)
 	c.send(request("POST", "/v1/chat/completions", "", "Content-Type: application/json", "Content-Length: 33554432"))
-	if resp, body := c.response(time.Second); resp.StatusCode != 401 {
-		t.Errorf("at the cap: status %d %s, want 401", resp.StatusCode, body)
+	if resp, body := c.response(time.Second); resp.StatusCode != 401 || !resp.Close {
+		t.Errorf("at the cap: status %d %s, Connection: close %v; want 401 and close", resp.StatusCode, body, resp.Close)
 	}
 }
 
