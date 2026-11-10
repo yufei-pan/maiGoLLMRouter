@@ -30,6 +30,6 @@ Why this repo's APIs, formats and agreed behaviour had to change: the story behi
 
 ## 2026-11-10 Reasoning effort shows its thinking
 - Changed: a request that sets `reasoning_effort` on an Anthropic-kind target also gets `thinking: {type: adaptive, display: summarized}` unless it sets its own `thinking`, so Claude streams a summary of its reasoning.
-- Why we had to change: Claude Opus 5.5 hides its thinking by default; at max effort it thought 277 s with nothing to stream (tested), and opencode gives up after 300 s waiting for a reply to start. Keep-alives don't help: opencode's SSE parser drops comment lines and its timers count only events.
+- Why we had to change: Claude Opus 5.5 hides its thinking by default; at max effort it thought 277 s with nothing to stream (tested), and opencode gives up after 300 s waiting for a reply to start. The router sends nothing before the first output, so that it can still fail over, and a keep-alive would show the person nothing.
 - Original design was wrong because: translating the effort setting alone assumed a client that asks for more reasoning can wait in silence for it. A client asking for reasoning expects to see progress, and every client's timeouts are built for a stream that moves.
-- Lesson: when a translated request can make the target work for minutes before its answer, ask the target for whatever progress it can stream as real events; silence and keep-alive comments both look dead to a client's timers.
+- Lesson: when a translated request can make the target work for minutes before its answer, ask the target for whatever progress it can stream as real events: silence looks dead to a client's timers, and a keep-alive shows the person nothing.
