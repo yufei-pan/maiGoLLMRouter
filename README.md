@@ -64,19 +64,39 @@ The server listens on `:8470` by default. The web UI is at
 of the required provider fields and where to obtain API keys, or
 `./maiGoLLMRouter -V` (`--version`) to print the version.
 
+The web UI has no sign-in and shows every logged prompt and reply, so keep
+`listen` off the internet. To use the API from the internet, set `api_listen`
+(see [Server](#server)): it serves the API alone, never the UI. Point an
+internet-facing proxy at it.
+
 ### Running as a systemd service
 
 After you install the binary and `config.toml` where you want them to live
 (e.g. `/usr/local/bin/maiGoLLMRouter` and `/etc/maiGoLLMRouter/config.toml`), run
 `--generate-systemd` from the directory where you want the unit file written.
-It resolves absolute paths for `ExecStart`, `WorkingDirectory`, and your
-current login `User`/`Group`:
+It resolves absolute paths for `ExecStart`, `WorkingDirectory` (the config's
+directory), and your current login `User`/`Group`:
 
 ```bash
 ./maiGoLLMRouter --generate-systemd -f /etc/maiGoLLMRouter/config.toml
 ```
 
-This writes `./mai-go-llm-router.service`. Install and start it:
+This writes `./mai-go-llm-router.service`. The unit is sandboxed:
+
+- The service can write only its log directory (`ProtectSystem=strict` with
+  `ReadWritePaths=` the absolute `log_dir`; a relative one is resolved against
+  `WorkingDirectory`, as the service resolves it). The generator creates that
+  directory if it is missing. If it can't read the config, it says so, and the
+  unit marks where to add `ReadWritePaths=` by hand.
+- Home directories are hidden (`ProtectHome=yes`), or read-only when the
+  binary, the config, the working or log directory, or an absolute `ffmpeg`
+  path is under `/home` or `/root`.
+- `RequiresMountsFor=` the binary, config and log directory, so a service on a
+  separate disk waits for it.
+- The rest is in the unit: no new privileges and no capabilities, a private
+  `/tmp` and `/dev`, only IP and Unix sockets, `UMask=0077`, and more.
+
+Install and start it:
 
 ```bash
 sudo cp mai-go-llm-router.service /etc/systemd/system/
@@ -87,9 +107,44 @@ sudo systemctl enable --now mai-go-llm-router
 Check status or follow logs with `systemctl status mai-go-llm-router` and
 `journalctl -u mai-go-llm-router -f`. Reload routing config after editing
 `config.toml` with `systemctl reload mai-go-llm-router` (sends SIGHUP; the
-service also polls the file every 3s by default). Edit `User=` / `Group=` in
-the unit file if needed, or re-run `--generate-systemd` after moving the binary
-or config so paths stay correct.
+service also polls the file every 3s by default). Re-run `--generate-systemd`
+after moving the binary, the config or the log directory, so the paths and
+`ReadWritePaths=` stay correct.
+
+#### Running as a dedicated user
+
+The router needs no root: it writes only its log directory. It also runs
+`ffmpeg` on client audio, so a user of its own limits what a decoder bug could
+reach. `--generate-systemd` run as root says so and points here. Keep
+everything the service uses (binary, config, log directory, an absolute
+`ffmpeg` path) outside home directories, where that user can reach it and the
+unit can hide homes.
+
+Create the user, let its group read the config (it holds every key), and give
+it the log directory. From the directory that holds `config.toml`, where the
+default `log_dir = "./logs"` lives (use your `log_dir` if it is elsewhere):
+
+```bash
+sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin mai-go-llm-router
+sudo mkdir -p logs
+sudo chgrp mai-go-llm-router config.toml
+sudo chmod 640 config.toml
+sudo chown -R mai-go-llm-router: logs
+sudo find logs -type f -exec chmod 600 {} +
+sudo find logs -type d -exec chmod 700 {} +
+```
+
+The router creates log files 0600 and directories 0700, but files written
+before keep their modes, hence the two `find`s. Then re-run
+`--generate-systemd` as that user (from a directory it can write), or edit
+`User=` and `Group=` in the installed unit, and restart:
+
+```bash
+cd /tmp && sudo -u mai-go-llm-router /usr/local/bin/maiGoLLMRouter --generate-systemd -f /etc/maiGoLLMRouter/config.toml
+sudo cp /tmp/mai-go-llm-router.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl restart mai-go-llm-router
+```
 
 ### Example request
 
@@ -177,9 +232,10 @@ See `[config.example.toml](config.example.toml)` for a fully commented example.
 
 | Key                   | Meaning                                                                                                    |
 | --------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `listen`              | Bind address (default `:8470`).                                                                            |
+| `listen`              | Bind address (default `:8470`). Serves everything: the API, `/healthz` and the web UI. The UI has no sign-in, so keep this address off the internet. Requires restart to change. |
+| `api_listen`          | Optional second bind address serving only the API (`/v1/...`) and `/healthz`, never the web UI (`/ui` paths answer 404 there). Point an internet-facing proxy here, e.g. a TLS proxy on the same host at `127.0.0.1:8471`; never at `listen`, since a proxy on the same host makes every visitor look local. Unset (the default): no second listener. Both addresses are bound before either serves, and a failed bind stops the start, naming the key. Requires restart to change. |
 | `log_dir`             | Directory for JSONL logs (default `./logs`).                                                               |
-| `client_keys`         | Accepted inbound bearer tokens. **If empty, a random key is generated at startup and printed to the log.** |
+| `client_keys`         | Accepted inbound bearer tokens. **If empty, a random key is generated at startup and printed to the log.** A reload applies changes: a key removed from the list stops working, and emptying the list leaves only a generated key (the one generated at startup, else a new one printed to the log). |
 | `global_blackout`     | Duration a failed normal (key, model) combination is skipped (default `60s`).                              |
 | `max_retries`         | Deprecated, no-op. A key is never retried in place; a bad output moves on without blackout, while a provider error blacks out the key. Kept only so old configs still load. |
 | `good_finish_reasons` | Normalized finish reasons treated as success.                                                              |
@@ -323,6 +379,9 @@ never written to disk (only masked forms appear).
 - `GET /ui` — HTML log viewer (embedded in the binary).
 - `GET /ui/logs?limit=N` — recent log entries as JSON.
 
+The web UI has no sign-in. It is served on `listen` only, never on
+`api_listen`.
+
 ## Reasoning / thinking budgets
 
 Please note that different providers — and even different models from the same
@@ -352,3 +411,13 @@ Practical implications:
 - **Gemini `input_audio`**: chat parts `{"type":"input_audio","input_audio":{"data","format"}}` (or a `data:` URI) reach Gemini as inline audio (`wav`, `mp3`, `ogg`, `webm`, `flac`, `aac`, `m4a`/`mp4`, `aiff`). OpenAI-kind providers get them unchanged. Anthropic targets are skipped for speech and transcription.
 - **stepfun's Step Plan** includes `stepaudio-2.5-tts` and `stepaudio-2.5-asr` but no audio-input chat model, so chat with `input_audio` should go to Gemini or OpenRouter.
 - `max_tokens` is required by Anthropic; if omitted it defaults to 8192.
+- **Model names** are at most 256 bytes, with no control characters; any other name gets 400 `invalid_model` before it is routed or logged.
+- **Request bodies** are at most 32 MB: a larger `Content-Length` gets 413 `body_too_large` before anything is read, and a chunked body is cut off at 32 MB. A body must arrive in full within 5 minutes; a stalled one gets 400 and its connection is closed.
+- **JSON values**: a request body holding more than 100,000 JSON values (each object, array, string, number, bool and null counts once; object keys don't) gets 400 `too_many_values` before it is routed or logged.
+- **A client that stops reading** a reply for 60 s is cut off, as if it had disconnected. A slow reader that keeps reading still gets the whole reply.
+- **Under memory pressure from large bodies** (the bodies being decoded at once share a 63 MiB budget), a request may wait up to 25 s, then get 503 `busy` with `Retry-After: 5`.
+- **Idle connections** close after 120 s. A proxy in front of the router should drop its idle connections sooner, or it may now and then send a request on one the router just closed and answer its client 502.
+- **`/ui/logs`** serves at most 500 rows per call; a larger `limit` is served as 500.
+- **Every client key can use every route**: any key in `client_keys` reaches every `/v1/...` route and model, on both listeners. There is no per-key scoping.
+- **Networks that inspect HTTPS** (common on company networks) can read a client key used on them. Give such devices their own key, so removing it from `client_keys` (a reload is enough) revokes only that device.
+- Known limitations and work deferred to the next version are listed in [`docs/limitations.md`](docs/limitations.md).
