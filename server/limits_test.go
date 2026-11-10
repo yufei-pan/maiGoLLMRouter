@@ -5,10 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -295,6 +299,50 @@ func TestBusyAfterWait(t *testing.T) {
 	}
 	if n := hits.Load(); n != 0 {
 		t.Errorf("the provider got %d requests the budget never admitted", n)
+	}
+}
+
+// lockedBuffer is a log sink the test may read while handlers write.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestBusyIsJournaled verifies each 503 busy leaves one journal line with the
+// body size and the wait, and nothing the client supplied.
+func TestBusyIsJournaled(t *testing.T) {
+	srv, ts, _ := budgetServer(t)
+	srv.budget = newBudget(1024)
+	srv.budgetWait = 50 * time.Millisecond
+	release, _ := srv.budget.acquire(t.Context(), 1024, 0)
+	defer release()
+	var logged lockedBuffer
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	for _, s := range budgetSenders {
+		s.send(t, ts)
+	}
+	line := regexp.MustCompile(`^\d{4}/\d\d/\d\d \d\d:\d\d:\d\d budget: busy after [0-9.]+m?s waiting for [1-9]\d* bytes$`)
+	lines := strings.Split(strings.TrimSpace(logged.String()), "\n")
+	if len(lines) != len(budgetSenders) {
+		t.Fatalf("%d journal lines for %d refused requests:\n%s", len(lines), len(budgetSenders), logged.String())
+	}
+	for _, l := range lines {
+		if !line.MatchString(l) {
+			t.Errorf("journal line %q does not match %v", l, line)
+		}
 	}
 }
 

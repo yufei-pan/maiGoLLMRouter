@@ -125,7 +125,8 @@ func withConnLimits(next http.Handler, lim ConnLimits) http.Handler {
 // connection won't be reused, instead of sending its next request into a
 // closed one. A handler that writes nothing needs no commit here: its header
 // is written in finishRequest, after the unread-body deadline, where
-// net/http's own drain fails fast and says Connection: close itself.
+// net/http's own drain either reads a buffered rest to EOF and keeps the
+// connection, or fails fast and says Connection: close itself.
 type progressWriter struct {
 	http.ResponseWriter
 	rc        *http.ResponseController // over the connection's own writer

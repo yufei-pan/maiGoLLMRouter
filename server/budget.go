@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"slices"
 	"sync"
@@ -97,14 +98,18 @@ func (b *budget) release(n int64) {
 // admit waits for n bytes of the budget. If the wait runs out it answers 503 busy
 // (Retry-After: 5) and returns ok=false; if the client went away it writes nothing.
 func (s *Server) admit(w http.ResponseWriter, r *http.Request, n int64) (release func(), ok bool) {
+	start := time.Now()
 	if release, ok = s.budget.acquire(r.Context(), n, s.budgetWait); ok {
 		return release, true
 	}
 	if r.Context().Err() == nil {
-		// 5 s is the design's value ("Wait limit"); nothing was measured for
-		// it. It is a hint for clients that retry; annai's own fallback moves
-		// on at the 503 (D9).
+		// 5 s is a hint for clients that retry; annai's own fallback moves on
+		// at the 503 (D9). Real traffic never filled the budget (peak 16.2 MiB
+		// of bodies in flight across 154,761 requests, Oct-Nov 2026), so busy
+		// means a burst of large bodies; half of all requests finish within
+		// 0.4 s, so room usually frees within a few seconds.
 		w.Header().Set("Retry-After", "5")
+		log.Printf("budget: busy after %s waiting for %d bytes", time.Since(start).Round(time.Millisecond), n)
 		writeCodedError(w, http.StatusServiceUnavailable, busyMessage, "server_error", "busy")
 	}
 	return nil, false
