@@ -425,7 +425,7 @@ Practical implications:
 - **stepfun's Step Plan** includes `stepaudio-2.5-tts` and `stepaudio-2.5-asr` but no audio-input chat model, so chat with `input_audio` should go to Gemini or OpenRouter.
 - `max_tokens` is required by Anthropic; if omitted it defaults to 8192.
 - **Model names** are at most 256 bytes, with no control characters; any other name gets 400 `invalid_model` before it is routed or logged.
-- **Request bodies** are at most 32 MB: a larger `Content-Length` gets 413 `body_too_large` before anything is read, and a chunked body is cut off at 32 MB. A body must arrive in full within 5 minutes; a stalled one gets 400 and its connection is closed.
+- **Request bodies** are at most 32 MB: a larger `Content-Length` gets 413 `body_too_large` before anything is read, and a body that states no length (chunked) gets the same 413 once it passes 32 MB. A body must arrive in full within 5 minutes; a stalled one gets 400 and its connection is closed.
 - **JSON values**: a request body holding more than 100,000 JSON values (each object, array, string, number, bool and null counts once; object keys don't) gets 400 `too_many_values` before it is routed or logged.
 - **A client that stops reading** a reply for 60 s is cut off, as if it had disconnected. A slow reader that keeps reading still gets the whole reply.
 - **Under memory pressure from large bodies** (the bodies being decoded at once share a 63 MiB budget), a request may wait up to 25 s, then get 503 `busy` with `Retry-After: 5`.

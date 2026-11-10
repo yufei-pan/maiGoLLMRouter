@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"mime/multipart"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -576,6 +578,86 @@ func TestDeclaredSizeTooLarge(t *testing.T) {
 	c.send(request("POST", "/v1/chat/completions", "", "Content-Type: application/json", "Content-Length: 33554432"))
 	if resp, body := c.response(time.Second); resp.StatusCode != 401 || !resp.Close {
 		t.Errorf("at the cap: status %d %s, Connection: close %v; want 401 and close", resp.StatusCode, body, resp.Close)
+	}
+}
+
+// sizedJSON is a JSON object of exactly size bytes (a string field pads it) that
+// starts with head, which must be the object's opening up to a field's start.
+func sizedJSON(head string, size int) []byte {
+	const tail = `"}`
+	pad := size - len(head) - len(tail)
+	return []byte(head + strings.Repeat("a", pad) + tail)
+}
+
+// postChunked sends body as one chunked request, as a client that doesn't
+// state a length does, and reads the reply.
+func postChunked(t *testing.T, addr, path, contentType string, body []byte) (*http.Response, string) {
+	t.Helper()
+	c := dialRaw(t, addr)
+	c.send(request("POST", path, "", authHeader, "Content-Type: "+contentType, "Transfer-Encoding: chunked"))
+	c.send(fmt.Sprintf("%x\r\n", len(body)))
+	c.send(string(body))
+	c.send("\r\n0\r\n\r\n")
+	return c.response(10 * time.Second)
+}
+
+// TestChunkedBodyOverCap verifies a body that doesn't state its length gets the
+// same answer as one that does when it is over 32 MiB: 413 body_too_large, not a
+// 400 about JSON cut off at the cap. Exactly 32 MiB is not refused for size.
+func TestChunkedBodyOverCap(t *testing.T) {
+	log.SetOutput(io.Discard) // the fake provider's reply to a speech request makes the router warn
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	addr := startServer(t, fullHandler(t, nil), DefaultConnLimits)
+	zero, _ := multipartUpload(t, 0) // the overhead of an upload, whatever its file's size
+	jsonBody := func(head string) func(int) ([]byte, string) {
+		return func(n int) ([]byte, string) { return sizedJSON(head, n), "application/json" }
+	}
+	cases := []struct {
+		name, path string
+		body       func(total int) (body []byte, contentType string)
+	}{
+		{"chat", "/v1/chat/completions", jsonBody(`{"model":"m","messages":[{"role":"user","content":"hi"}],"pad":"`)},
+		{"speech", "/v1/audio/speech", jsonBody(`{"model":"m","input":"hi","pad":"`)},
+		{"JSON transcription", "/v1/audio/transcriptions", jsonBody(`{"model":"m","input_audio":{"data":"UklGRg==","format":"wav"},"pad":"`)},
+		{"multipart transcription", "/v1/audio/transcriptions", func(n int) ([]byte, string) {
+			b, ct := multipartUpload(t, n-len(zero))
+			return []byte(b), ct
+		}},
+	}
+	for _, c := range cases {
+		for _, over := range []bool{true, false} {
+			total := maxBody
+			if over {
+				total++
+			}
+			t.Run(fmt.Sprintf("%s over=%v", c.name, over), func(t *testing.T) {
+				body, ct := c.body(total)
+				if len(body) != total {
+					t.Fatalf("built %d bytes, want %d", len(body), total)
+				}
+				resp, reply := postChunked(t, addr, c.path, ct, body)
+				checkBodySize(t, resp, reply, over)
+			})
+		}
+	}
+}
+
+// checkBodySize checks a reply is the 413 for an oversized body, or, for one
+// at the cap, anything else.
+func checkBodySize(t *testing.T, resp *http.Response, body string, over bool) {
+	t.Helper()
+	var e struct {
+		Error struct{ Message, Type, Code string }
+	}
+	_ = json.Unmarshal([]byte(body), &e)
+	if !over {
+		if resp.StatusCode == 413 || e.Error.Code == "body_too_large" {
+			t.Errorf("a body of exactly 32 MiB was refused for size: %d %s", resp.StatusCode, body)
+		}
+		return
+	}
+	if resp.StatusCode != 413 || e.Error.Code != "body_too_large" || e.Error.Type != "invalid_request_error" || e.Error.Message != "request body is larger than 32 MB" {
+		t.Errorf("status %d %s, want the 413 body_too_large", resp.StatusCode, body)
 	}
 }
 

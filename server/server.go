@@ -4,7 +4,6 @@ package server
 
 import (
 	"encoding/json"
-	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -158,9 +157,8 @@ func (s *Server) handle(op provider.Operation) http.HandlerFunc {
 			return
 		}
 
-		raw, err := io.ReadAll(io.LimitReader(r.Body, maxBody))
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "failed to read request body", "invalid_request_error")
+		raw, ok := readBody(w, r)
+		if !ok {
 			return
 		}
 		release, ok := s.admit(w, r, int64(len(raw)))

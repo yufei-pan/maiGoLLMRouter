@@ -9,7 +9,8 @@ import (
 
 // maxBody is the most of a request body any handler reads: today's 32 MiB
 // cap, now one constant for every reader. A larger declared Content-Length is
-// refused with 413 before anything is read.
+// refused with 413 before anything is read; a body that states no length and
+// passes it is refused with the same 413 by readBody.
 const maxBody = 32 << 20
 
 // writePiece is the most of a response handed to the connection under one
@@ -18,6 +19,28 @@ const maxBody = 32 << 20
 const writePiece = 64 << 10
 
 var bodyTooLargeMessage = fmt.Sprintf("request body is larger than %d MB", maxBody>>20)
+
+// writeBodyTooLarge is the one answer for a body over maxBody, declared or not.
+func writeBodyTooLarge(w http.ResponseWriter) {
+	writeCodedError(w, http.StatusRequestEntityTooLarge, bodyTooLargeMessage, "invalid_request_error", "body_too_large")
+}
+
+// readBody reads a request body of at most maxBody bytes. One that goes on past
+// that gets the 413 a declared Content-Length over maxBody gets, so a client that
+// states no length hears the same answer, not a 400 about JSON cut off at the
+// cap. ok is false once the reply is written.
+func readBody(w http.ResponseWriter, r *http.Request) (raw []byte, ok bool) {
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
+	if len(raw) > maxBody {
+		writeBodyTooLarge(w)
+		return nil, false
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "failed to read request body", "invalid_request_error")
+		return nil, false
+	}
+	return raw, true
+}
 
 // ConnLimits bounds how long one client can hold a connection without making
 // progress.
@@ -66,7 +89,7 @@ func withConnLimits(next http.Handler, lim ConnLimits) http.Handler {
 		pw := &progressWriter{ResponseWriter: w, rc: rc, stall: lim.Write, body: body}
 		if r.ContentLength > maxBody {
 			// Before auth, on every path: such a body can never succeed.
-			writeCodedError(pw, http.StatusRequestEntityTooLarge, bodyTooLargeMessage, "invalid_request_error", "body_too_large")
+			writeBodyTooLarge(pw)
 		} else {
 			next.ServeHTTP(pw, r)
 		}

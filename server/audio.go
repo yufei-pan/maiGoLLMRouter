@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -39,9 +40,8 @@ func (s *Server) handleSpeech(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	raw, err := io.ReadAll(io.LimitReader(r.Body, maxBody))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "failed to read request body", "invalid_request_error")
+	raw, ok := readBody(w, r)
+	if !ok {
 		return
 	}
 	release, ok := s.admit(w, r, int64(len(raw)))
@@ -141,9 +141,8 @@ func (s *Server) handleTranscription(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	raw, size, msg := readTranscriptionBody(w, r)
-	if msg != "" {
-		writeError(w, http.StatusBadRequest, msg, "invalid_request_error")
+	raw, size, ok := readTranscriptionBody(w, r)
+	if !ok {
 		return
 	}
 	release, ok := s.admit(w, r, size)
@@ -193,22 +192,26 @@ func (s *Server) handleTranscription(w http.ResponseWriter, r *http.Request) {
 }
 
 // readTranscriptionBody reads either request shape in full: an upload into
-// r.MultipartForm, with raw nil, or JSON into raw. size is the bytes read. A
-// non-empty message is the reason the request is refused.
-func readTranscriptionBody(w http.ResponseWriter, r *http.Request) (raw []byte, size int64, msg string) {
+// r.MultipartForm, with raw nil, or JSON into raw. size is the bytes read. ok is
+// false once the reply that refuses the request is written.
+func readTranscriptionBody(w http.ResponseWriter, r *http.Request) (raw []byte, size int64, ok bool) {
 	if mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mt == "multipart/form-data" {
 		body := &countedBody{ReadCloser: http.MaxBytesReader(w, r.Body, maxBody)}
 		r.Body = body
 		if err := r.ParseMultipartForm(maxBody); err != nil {
-			return nil, 0, "invalid multipart body"
+			if tooBig := new(http.MaxBytesError); errors.As(err, &tooBig) {
+				writeBodyTooLarge(w)
+			} else {
+				writeError(w, http.StatusBadRequest, "invalid multipart body", "invalid_request_error")
+			}
+			return nil, 0, false
 		}
-		return nil, body.n, ""
+		return nil, body.n, true
 	}
-	raw, err := io.ReadAll(io.LimitReader(r.Body, maxBody))
-	if err != nil {
-		return nil, 0, "failed to read request body"
+	if raw, ok = readBody(w, r); !ok {
+		return nil, 0, false
 	}
-	return raw, int64(len(raw)), ""
+	return raw, int64(len(raw)), true
 }
 
 // countedBody counts the bytes read through it.
