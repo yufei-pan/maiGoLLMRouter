@@ -24,8 +24,6 @@ import (
 	"maiGoLLMRouter/router"
 )
 
-const maxAudioRequest = 32 << 20
-
 // speechConsumed are the speech request fields the router reads itself; any
 // other field passes through to OpenAI-kind providers.
 var speechConsumed = map[string]bool{
@@ -41,7 +39,7 @@ func (s *Server) handleSpeech(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	raw, err := io.ReadAll(io.LimitReader(r.Body, maxAudioRequest))
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxBody))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "failed to read request body", "invalid_request_error")
 		return
@@ -199,14 +197,14 @@ func (s *Server) handleTranscription(w http.ResponseWriter, r *http.Request) {
 // non-empty message is the reason the request is refused.
 func readTranscriptionBody(w http.ResponseWriter, r *http.Request) (raw []byte, size int64, msg string) {
 	if mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mt == "multipart/form-data" {
-		body := &countedBody{ReadCloser: http.MaxBytesReader(w, r.Body, maxAudioRequest)}
+		body := &countedBody{ReadCloser: http.MaxBytesReader(w, r.Body, maxBody)}
 		r.Body = body
-		if err := r.ParseMultipartForm(maxAudioRequest); err != nil {
+		if err := r.ParseMultipartForm(maxBody); err != nil {
 			return nil, 0, "invalid multipart body"
 		}
 		return nil, body.n, ""
 	}
-	raw, err := io.ReadAll(io.LimitReader(r.Body, maxAudioRequest))
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxBody))
 	if err != nil {
 		return nil, 0, "failed to read request body"
 	}
