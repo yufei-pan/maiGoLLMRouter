@@ -45,6 +45,10 @@ func (r *configReloader) tryReload() {
 		log.Printf("config reload: listen %q -> %q ignored (restart required)", prev.Server.Listen, next.Server.Listen)
 		next.Server.Listen = prev.Server.Listen
 	}
+	if next.Server.APIListen != prev.Server.APIListen {
+		log.Printf("config reload: api_listen %q -> %q ignored (restart required)", prev.Server.APIListen, next.Server.APIListen)
+		next.Server.APIListen = prev.Server.APIListen
+	}
 	if next.Server.LogDir != prev.Server.LogDir {
 		log.Printf("config reload: log_dir %q -> %q ignored (restart required)", prev.Server.LogDir, next.Server.LogDir)
 		next.Server.LogDir = prev.Server.LogDir
@@ -58,6 +62,11 @@ func (r *configReloader) tryReload() {
 	r.srv.Reload(next)
 	r.cfg = next
 	logReload(next)
+	// The file's keys were emptied, so build() generated a key; a key carried
+	// over from prev was already printed.
+	if gen := next.Server.GeneratedClientKey; gen != "" && gen != prev.Server.GeneratedClientKey {
+		logGeneratedKey(gen)
+	}
 }
 
 func (r *configReloader) startWatch(interval time.Duration) {

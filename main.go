@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -82,21 +83,61 @@ func main() {
 	startSignalReload(reloader.tryReload)
 	reloader.startWatch(cfg.Server.ConfigReloadInterval)
 
-	mux := http.NewServeMux()
-	srv.Register(mux)
-	webui.Register(mux, logs, active)
-
-	httpServer := &http.Server{
-		Addr:              cfg.Server.Listen,
-		Handler:           srv.WithCORS(mux),
-		ReadHeaderTimeout: 10 * time.Second,
+	fullHandler, apiHandler := buildHandlers(srv, logs, active)
+	// Bind both before serving either, so a bad api_listen stops the start.
+	fullLn, apiLn, err := listenAll(cfg)
+	if err != nil {
+		log.Fatalf("server: %v", err)
 	}
 
 	logStartup(cfg, configPath)
 	log.Printf("config reload: SIGHUP / systemctl reload; auto poll every %s (set config_reload_interval = \"0\" to disable polling)", formatReloadInterval(cfg.Server.ConfigReloadInterval))
-	if err := httpServer.ListenAndServe(); err != nil {
-		log.Fatalf("server: %v", err)
+
+	// Serve only returns on a failure, and either server failing ends the
+	// process: there is no graceful shutdown. One slot per server, so neither
+	// send ever blocks.
+	errc := make(chan error, 2)
+	serve := func(h http.Handler, ln net.Listener) {
+		errc <- server.NewHTTPServer(h, server.DefaultConnLimits).Serve(ln)
 	}
+	go serve(fullHandler, fullLn)
+	if apiLn != nil {
+		go serve(apiHandler, apiLn)
+	}
+	log.Fatalf("server: %v", <-errc)
+}
+
+// buildHandlers returns the handler for listen (the API, /healthz and the web
+// UI) and the one for api_listen (the API and /healthz only). The web UI has no
+// auth, so its routes are never registered on the API mux.
+func buildHandlers(srv *server.Server, logs *logstore.Store, active *inflight.Registry) (full, api http.Handler) {
+	fullMux := http.NewServeMux()
+	srv.Register(fullMux)
+	webui.Register(fullMux, logs, active)
+
+	apiMux := http.NewServeMux()
+	srv.Register(apiMux)
+
+	return srv.WithCORS(fullMux), srv.WithCORS(apiMux)
+}
+
+// listenAll binds listen and, when set, api_listen. api is nil when api_listen
+// is unset. On an error nothing stays bound, and the error names the key and
+// the address as configured.
+func listenAll(cfg *config.Config) (full, api net.Listener, err error) {
+	full, err = net.Listen("tcp", cfg.Server.Listen)
+	if err != nil {
+		return nil, nil, fmt.Errorf("listen = %q: %w", cfg.Server.Listen, err)
+	}
+	if cfg.Server.APIListen == "" {
+		return full, nil, nil
+	}
+	api, err = net.Listen("tcp", cfg.Server.APIListen)
+	if err != nil {
+		full.Close()
+		return nil, nil, fmt.Errorf("api_listen = %q: %w", cfg.Server.APIListen, err)
+	}
+	return full, api, nil
 }
 
 // startLogCleanup runs an initial retention sweep and then a daily one in the
@@ -126,19 +167,18 @@ func logStartup(cfg *config.Config, configPath string) {
 	if err != nil {
 		abs = configPath
 	}
-	base := "http://" + cfg.Server.Listen
-	if strings.HasPrefix(cfg.Server.Listen, ":") {
-		base = "http://localhost" + cfg.Server.Listen
-	}
+	base := baseURL(cfg.Server.Listen)
 
 	log.Printf("maiGoLLMRouter %s", version)
 	log.Printf("config loaded from %s", abs)
 	log.Printf("inbound API type: OpenAI-compatible (bearer auth)")
 	log.Printf("inbound endpoint: %s/v1  (POST /v1/chat/completions, POST /v1/embeddings, POST /v1/responses, GET /v1/models)", base)
+	if cfg.Server.APIListen != "" {
+		log.Printf("API-only listener: %s/v1 (no web UI)", baseURL(cfg.Server.APIListen))
+	}
 
 	if cfg.Server.GeneratedClientKey != "" {
-		log.Printf("client auth: no client_keys in config; generated one for this run:")
-		log.Printf("    %s", cfg.Server.GeneratedClientKey)
+		logGeneratedKey(cfg.Server.GeneratedClientKey)
 	} else {
 		log.Printf("client auth: %d client key(s) read from config file (%s)", len(cfg.Server.ClientKeys), abs)
 	}
@@ -169,6 +209,22 @@ func logStartup(cfg *config.Config, configPath string) {
 		log.Printf("fallback providers (%s): %s", cfg.FallbackSelection, strings.Join(cfg.FallbackProviders, ", "))
 	}
 	log.Printf("web UI: %s/ui", base)
+}
+
+// baseURL is the http:// URL for a listen address, with localhost for a
+// leading ":".
+func baseURL(addr string) string {
+	if strings.HasPrefix(addr, ":") {
+		return "http://localhost" + addr
+	}
+	return "http://" + addr
+}
+
+// logGeneratedKey prints a client key the router generated, at startup and
+// when a reload generates a new one.
+func logGeneratedKey(key string) {
+	log.Printf("client auth: no client_keys in config; generated one for this run:")
+	log.Printf("    %s", key)
 }
 
 func formatReloadInterval(d time.Duration) string {
