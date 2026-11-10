@@ -12,7 +12,8 @@ import (
 
 const systemdUnitFilename = "mai-go-llm-router.service"
 
-// systemdUnitParams holds resolved paths and identity for a generated unit.
+// systemdUnitParams holds the paths and identity for a generated unit: the
+// resolved paths it writes, and the as-written ones ProtectHome= also judges.
 type systemdUnitParams struct {
 	ExecStart        string
 	ExecPath         string // absolute binary path

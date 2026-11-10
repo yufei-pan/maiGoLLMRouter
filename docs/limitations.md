@@ -27,3 +27,9 @@ Reviewers read this file first, and raise an entry again only with new evidence 
 - **What the operator sees:** when stepfun transcription's ffmpeg conversion ends because the request's context did (a wait for a conversion slot, or a conversion that outlasts `audio_timeout`, under a flood of conversions), the client gets 400 "this provider can't read <format> audio" (`provider/transcription.go`), not a busy or timeout answer.
 - **Why:** the correct answer depends on how the router treats an attempt that ran out of time (blackout, the next target), which this change doesn't touch.
 - **Revisit when:** the next version.
+
+### ffmpeg reached through a home directory
+- **Kind:** deferred, to the next version.
+- **What the operator sees:** `--generate-systemd` judges `ProtectHome=` from an absolute `ffmpeg` path only. A relative one with a slash (`ffmpeg = "bin/ffmpeg"`), or a bare `ffmpeg` whose file on systemd's PATH is a link into `/home` or `/root`, can get `ProtectHome=yes`; the service then can't start ffmpeg, so speech goes out unconverted and stepfun transcription of formats it can't read answers 400. Setting `ProtectHome=read-only` in the unit fixes it.
+- **Why:** both layouts are unusual (the usual `/usr/bin/ffmpeg` is a real file), and the problem predates this change.
+- **Revisit when:** the next version. The fix: judge ffmpeg where the service finds it (a relative path joined to `WorkingDirectory`, a bare name looked up on systemd's default PATH).

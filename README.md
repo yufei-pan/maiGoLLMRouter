@@ -74,9 +74,9 @@ internet-facing proxy at it.
 After you install the binary and `config.toml` where you want them to live
 (e.g. `/usr/local/bin/maiGoLLMRouter` and `/etc/maiGoLLMRouter/config.toml`), run
 `--generate-systemd` from the directory where you want the unit file written.
-It resolves absolute paths, following symlinks, for `ExecStart`,
-`WorkingDirectory` (the config's directory), and your current login
-`User`/`Group`:
+It writes real paths, with symlinks resolved, for `ExecStart`, `-config` and
+`WorkingDirectory` (the directory the config file sits in, even when that file
+is a link to one elsewhere), and uses your current login `User`/`Group`:
 
 ```bash
 ./maiGoLLMRouter --generate-systemd -f /etc/maiGoLLMRouter/config.toml
