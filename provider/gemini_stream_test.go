@@ -244,3 +244,21 @@ func TestStreamOptionsNeverReachTranslatedDialects(t *testing.T) {
 		t.Errorf("Anthropic body = %v, want no stream_options", a)
 	}
 }
+
+// The translator builds its chunks with Go int indexes, not JSON numbers: the
+// reply it adds up to (the log, a Responses stream's final object) must still
+// keep two calls apart.
+func TestGeminiStreamTwoCallsStayApart(t *testing.T) {
+	srv := streamServer(t, nil, func(w http.ResponseWriter, r *http.Request) {
+		sseChunks(w,
+			`{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"a","args":{"x":1}}},{"functionCall":{"name":"b","args":{"y":2}}}]},"finishReason":"STOP"}]}`)
+	})
+	s, _ := geminiStreamCall(t, srv.URL, OpChat, geminiChatBodyForStream(false), nil)
+	if _, err := drain(t, s); err != nil {
+		t.Fatalf("stream failed: %v", err)
+	}
+	calls := decodeCompletion(t, s.State().Body).Choices[0].Message.ToolCalls
+	if len(calls) != 2 || calls[0].Function.Name != "a" || calls[1].Function.Arguments != `{"y":2}` {
+		t.Errorf("tool calls = %+v, want a and b apart", calls)
+	}
+}

@@ -128,10 +128,14 @@ func (c *chatChoiceAcc) call(i int) *chatCallAcc {
 	return call
 }
 
-// indexOf reads an "index" field, 0 when absent.
+// indexOf reads an "index" field, 0 when absent. A chunk decoded from JSON
+// holds a float64; one a translator built holds an int.
 func indexOf(m map[string]any) int {
-	if f, ok := m["index"].(float64); ok {
-		return int(f)
+	switch v := m["index"].(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
 	}
 	return 0
 }
