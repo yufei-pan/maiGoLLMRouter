@@ -495,6 +495,11 @@ func ChatToResponses(chatRaw []byte, model string, chatFinish string) ([]byte, e
 		usageOut["input_tokens"] = usage["prompt_tokens"]
 		usageOut["output_tokens"] = usage["completion_tokens"]
 		usageOut["total_tokens"] = usage["total_tokens"]
+		if details, ok := usage["prompt_tokens_details"].(map[string]any); ok {
+			if cached, ok := details["cached_tokens"]; ok {
+				usageOut["input_tokens_details"] = map[string]any{"cached_tokens": cached}
+			}
+		}
 	}
 
 	var idBytes [8]byte

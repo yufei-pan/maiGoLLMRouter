@@ -333,6 +333,26 @@ func doJSON(ctx context.Context, client *http.Client, method, url string, header
 	return resp.StatusCode, raw, nil
 }
 
+// openAIOnlyFields are OpenAI request fields that the translated dialects
+// (Anthropic, Gemini) have no counterpart for. Both reject a field name they
+// don't know with a 400, so the translations drop these instead of passing them
+// through. Clients send them often: Responses clients send most of them, and pi
+// sends "store" on every request.
+var openAIOnlyFields = []string{
+	"parallel_tool_calls", "metadata", "service_tier", "max_tool_calls",
+	"prompt_cache_key", "safety_identifier", "logprobs", "top_logprobs",
+	"store", "include", "reasoning", "truncation", "background", "user",
+}
+
+// withOpenAIOnly returns a translated dialect's consumed set: the fields it
+// handles itself plus openAIOnlyFields.
+func withOpenAIOnly(own map[string]bool) map[string]bool {
+	for _, k := range openAIOnlyFields {
+		own[k] = true
+	}
+	return own
+}
+
 // extras returns the inbound body fields that are not in the consumed set, so
 // translated dialects can pass unknown arguments through (#13).
 func extras(body map[string]any, consumed map[string]bool) map[string]any {

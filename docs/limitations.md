@@ -33,3 +33,27 @@ Reviewers read this file first, and raise an entry again only with new evidence 
 - **What the operator sees:** `--generate-systemd` judges `ProtectHome=` from an absolute `ffmpeg` path only. A relative one with a slash (`ffmpeg = "bin/ffmpeg"`), or a bare `ffmpeg` whose file on systemd's PATH is a link into `/home` or `/root`, can get `ProtectHome=yes`; the service then can't start ffmpeg, so speech goes out unconverted and stepfun transcription of formats it can't read answers 400. Setting `ProtectHome=read-only` in the unit fixes it.
 - **Why:** both layouts are unusual (the usual `/usr/bin/ffmpeg` is a real file), and the problem predates this change.
 - **Revisit when:** the next version. The fix: judge ffmpeg where the service finds it (a relative path joined to `WorkingDirectory`, a bare name looked up on systemd's default PATH).
+
+### Claude replies are not streamed
+- **Kind:** deferred, to the next version (the change right after this one; the user chose "Effort now, streaming next", 2026-11-10).
+- **What the operator sees:** a streamed request to an Anthropic-kind target gets nothing until Anthropic's whole reply is in; then it arrives as one burst of chunks. A long turn at high effort shows no progress, and a client that gives up after a silence (opencode's `chunkTimeout`, a proxy's idle timeout) may cut it off.
+- **Why:** the Anthropic dialect calls the Messages API without streaming and replays the finished reply as a stream (`provider.CallStream`'s default branch).
+- **Revisit when:** the next version: stream the Messages API and translate its events (text, tool-call arguments, thinking, usage) into Chat chunks, as the Gemini dialect does.
+
+### Gemini targets reject reasoning_effort
+- **Kind:** deferred, to the next version.
+- **What the operator sees:** a request with OpenAI's `reasoning_effort` that reaches a Gemini-kind target gets 400 "Unknown name \"reasoning_effort\" at 'generation_config'", so a target list that mixes Gemini with other providers fails over past Gemini whenever the client sets effort.
+- **Why:** the 2026-11-10 change translated `reasoning_effort` for Anthropic only, where it was asked for; Gemini's equivalent (`thinkingConfig`) differs by model generation (a level on Gemini 3, a token budget before), which needs its own design.
+- **Revisit when:** the next version.
+
+### Responses clients can't set Claude's effort
+- **Kind:** deferred, to the next version.
+- **What the operator sees:** a Responses request's `reasoning: {"effort": ...}` is dropped on its way to a Chat-translated target (`ResponsesToChat`), so a Responses client reaching Claude gets the model's default effort (`medium` on Claude Opus 5.5).
+- **Why:** mapping it to `reasoning_effort` would turn Gemini Responses requests that carry `reasoning`, which work today, into 400s until Gemini translates `reasoning_effort` too (the entry above).
+- **Revisit when:** with the Gemini entry above.
+
+### Claude 5.5 rejects forced tool use and non-default temperature
+- **Kind:** deferred, to the next version (with Claude streaming).
+- **What the operator sees:** through the router, Claude Opus 5.5 answers `tool_choice: "required"` (or a named function) with 400 "tool_choice: type \"tool\" and \"any\" are not supported for this model", and any `temperature` other than 1 with 400 "`temperature` is deprecated for this model" (both tested 2026-11-10). annai's `requireTool` sends `"required"`.
+- **Why:** the Anthropic dialect translates these fields as older models take them; which models refuse them differs by model, and this change didn't touch them.
+- **Revisit when:** the next version, with the Claude streaming change.

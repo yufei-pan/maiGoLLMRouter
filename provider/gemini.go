@@ -12,20 +12,14 @@ import (
 // geminiConsumed lists OpenAI fields handled explicitly; everything else is
 // passed through, either to the top level (geminiTopLevel) or, by default, into
 // generationConfig (#13).
-var geminiConsumed = map[string]bool{
+var geminiConsumed = withOpenAIOnly(map[string]bool{
 	"model": true, "messages": true, "input": true, "stream": true, "stream_options": true,
 	"temperature": true, "top_p": true, "max_tokens": true,
 	"max_completion_tokens": true, "stop": true, "n": true,
-	"encoding_format": true, "dimensions": true, "user": true,
+	"encoding_format": true, "dimensions": true,
 	"tools": true, "tool_choice": true, "functions": true, "function_call": true,
 	"response_format": true,
-	// OpenAI-only fields. Passing them through into generationConfig makes
-	// Gemini 400 on unknown names (Responses clients often send these).
-	"parallel_tool_calls": true, "metadata": true, "service_tier": true,
-	"max_tool_calls": true, "prompt_cache_key": true, "safety_identifier": true,
-	"logprobs": true, "top_logprobs": true, "store": true, "include": true,
-	"reasoning": true, "truncation": true, "background": true,
-}
+})
 
 // geminiTopLevel lists generateContent request fields that belong at the top
 // level of the request body rather than inside generationConfig. Both camelCase

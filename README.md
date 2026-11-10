@@ -399,10 +399,18 @@ The web UI has no sign-in. It is served on `listen` only, never on
 
 Please note that different providers — and even different models from the same
 provider — likely expect **different reasoning / thinking budget parameters**
-(e.g. OpenAI's `reasoning_effort`, Anthropic's `thinking.budget_tokens`, Gemini's
+(e.g. OpenAI's `reasoning_effort`, Anthropic's `output_config.effort`, Gemini's
 `thinkingConfig.thinkingBudget`). Unlike OpenRouter, maiGoLLMRouter does **not**
-adapt or normalize any of these to maintain broad compatibility — whatever
-reasoning fields you send are passed through to the downstream provider as-is.
+adapt or normalize these in general — the reasoning fields you send are passed
+through to the downstream provider as-is — with one exception: for Anthropic-kind
+targets, OpenAI's `reasoning_effort` becomes Anthropic's `output_config.effort`,
+since Anthropic rejects `reasoning_effort` outright. `none` and `minimal` become
+`low`, the least effort every current Claude model takes (Claude Opus 5.5 can't
+turn thinking off); other values go on lowercased, for Anthropic to judge: the
+levels differ by model (Claude Opus 5.5, Sonnet 5.5 and Haiku 5.5 take `low`,
+`medium`, `high`, `xhigh` and `max`; older models take fewer, and some none). An
+`output_config.effort` the request sets itself wins. Gemini targets still get
+`reasoning_effort` as sent, and reject it.
 
 Practical implications:
 
@@ -418,7 +426,8 @@ Practical implications:
 
 - **Streaming**: once the first output has gone to the client, the router can no longer try another key, so a reply cut short (`length`, `content_filter`) or broken mid-way reaches the client as it is; a client with its own fallback (such as annai) takes over from there. When every attempt fails before any output, the client gets a normal JSON error with a real status, never a 200; when every target refused on policy grounds, it gets a short stream that ends as a refusal (`content_filter`). A reverse proxy in front of the router must not buffer `text/event-stream` (the router sends `X-Accel-Buffering: no` for nginx). Streamed requests are never rewritten by `coerce_trailing_assistant`. Gemini's API sends each tool call whole, so tool-call arguments stream piece by piece only through OpenAI-kind providers.
 - Anthropic does not support embeddings; embedding requests routed there return an error and advance.
-- For translated dialects, pass-through of unknown arguments is best-effort. For Gemini, known top-level request fields (`toolConfig`, `safetySettings`, `systemInstruction`, `cachedContent`, `labels`, in camelCase or snake_case) are placed at the request root and an explicit `generationConfig` is merged in; all other extras go into `generationConfig`. For Anthropic, extras are merged top-level. OpenAI is pass-through (a non-streamed request has its streaming controls removed).
+- For translated dialects, pass-through of unknown arguments is best-effort. For Gemini, known top-level request fields (`toolConfig`, `safetySettings`, `systemInstruction`, `cachedContent`, `labels`, in camelCase or snake_case) are placed at the request root and an explicit `generationConfig` is merged in; all other extras go into `generationConfig`. For Anthropic, extras are merged top-level. Both drop OpenAI-only fields that they have no counterpart for and would reject (`store`, `parallel_tool_calls`, `metadata`, `user`, `service_tier`, `max_tool_calls`, `prompt_cache_key`, `safety_identifier`, `logprobs`, `top_logprobs`, `include`, `reasoning`, `truncation`, `background`). OpenAI is pass-through (a non-streamed request has its streaming controls removed).
+- **Anthropic prompt caching** is on for every request: the router adds Anthropic's automatic `cache_control: {"type": "ephemeral"}` (5-minute lifetime, renewed by each read) unless the request sends its own `cache_control`, such as `{"type": "ephemeral", "ttl": "1h"}`. A cache read costs a tenth of the input price or less, a write 1.25x; a prompt shorter than the model's minimum is simply not cached. `usage.prompt_tokens` counts the whole prompt, cached part included; `usage.prompt_tokens_details.cached_tokens` is the part read from cache and `cache_write_tokens` the part written to it (OpenRouter's name, which annai reads).
 - **Gemini tool calling** is translated from the OpenAI shape: `tools` (`{type:"function", function:{...}}`) and the legacy `functions` array become Gemini `functionDeclarations` (the parameter JSON Schema is sanitized to the fields Gemini accepts, dropping e.g. `additionalProperties`/`$schema`), `tool_choice` becomes `toolConfig.functionCallingConfig`, assistant `tool_calls` and `tool` result messages become `functionCall`/`functionResponse` parts, and Gemini `functionCall` responses are converted back into OpenAI `tool_calls` (with `finish_reason: "tool_calls"`). Tools already in Gemini-native form (`{functionDeclarations:[...]}`) are passed through unchanged.
 - **Gemini thought signatures**: Gemini 3 refuses a turn whose earlier tool call comes back without its thought signature. The router puts the signature on the tool call (`thought_signature`) and also remembers it by tool-call id (up to 4096, for 24 hours, until restart), so a client that drops the field still works; a remembered signature goes back only to the provider/model that wrote it. When none is known, the first call of a `gemini-*` turn gets Google's placeholder `skip_thought_signature_validator`, which Gemini accepts at some cost to reasoning. Through OpenAI-kind endpoints (OpenRouter, Google's OpenAI-style endpoint) the signatures travel in `reasoning_details` / `extra_content`, which the client must keep and send back; the router passes them through.
 - **Gemini `input_audio`**: chat parts `{"type":"input_audio","input_audio":{"data","format"}}` (or a `data:` URI) reach Gemini as inline audio (`wav`, `mp3`, `ogg`, `webm`, `flac`, `aac`, `m4a`/`mp4`, `aiff`). OpenAI-kind providers get them unchanged. Anthropic targets are skipped for speech and transcription.

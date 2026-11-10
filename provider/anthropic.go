@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"strings"
 	"time"
@@ -15,11 +16,29 @@ const defaultAnthropicMaxTokens = 8192
 
 // anthropicConsumed lists OpenAI fields handled explicitly; everything else is
 // merged into the top-level request body as passthrough (#13).
-var anthropicConsumed = map[string]bool{
+var anthropicConsumed = withOpenAIOnly(map[string]bool{
 	"model": true, "messages": true, "input": true, "stream": true, "stream_options": true,
 	"max_tokens": true, "max_completion_tokens": true, "stop": true, "n": true,
 	"tools": true, "tool_choice": true, "functions": true, "function_call": true,
-	"response_format": true, // consumed (dropped): Anthropic uses a different API
+	"response_format":  true, // consumed (dropped): Anthropic uses a different API
+	"reasoning_effort": true, // becomes output_config.effort (anthropicEffort)
+})
+
+// anthropicEffort reads OpenAI's reasoning_effort as Anthropic's
+// output_config.effort. "none" and "minimal" become "low": Claude Opus 5.5 can't
+// turn thinking off, and low is the least effort every current Claude model
+// takes. Any other value goes on lowercased, for Anthropic to judge (it takes
+// low, medium, high, xhigh and max). ok is false when there is nothing to send.
+func anthropicEffort(v any) (effort string, ok bool) {
+	s, _ := v.(string)
+	s = strings.ToLower(strings.TrimSpace(s))
+	switch s {
+	case "":
+		return "", false
+	case "none", "minimal":
+		return "low", true
+	}
+	return s, true
 }
 
 func callAnthropic(ctx context.Context, client *http.Client, baseURL, apiKey string, req Request) (*Response, error) {
@@ -128,6 +147,29 @@ func buildAnthropicBody(req Request) map[string]any {
 	// Passthrough of unknown args at the top level (tools/response_format consumed).
 	for k, v := range extras(req.Body, anthropicConsumed) {
 		body[k] = v
+	}
+	// Automatic prompt caching, unless the client set its own cache_control.
+	// Coding agents resend the whole conversation every turn: a cache read costs
+	// a tenth of the input price or less, a write 1.25x. The 5-minute lifetime
+	// is the user's choice (2026-11-10); a read restarts it.
+	if _, set := body["cache_control"]; !set {
+		body["cache_control"] = map[string]any{"type": "ephemeral"}
+	}
+	// Anthropic rejects reasoning_effort as an unknown field; its own name for
+	// it is output_config.effort. An effort the client set there itself wins.
+	if effort, ok := anthropicEffort(req.Body["reasoning_effort"]); ok {
+		switch given := body["output_config"].(type) {
+		case nil:
+			body["output_config"] = map[string]any{"effort": effort}
+		case map[string]any:
+			if _, set := given["effort"]; !set {
+				// A copy: the caller's body goes to other targets as it is.
+				merged := make(map[string]any, len(given)+1)
+				maps.Copy(merged, given)
+				merged["effort"] = effort
+				body["output_config"] = merged
+			}
+		}
 	}
 	return body
 }
@@ -352,8 +394,10 @@ func anthropicToOpenAIChat(raw []byte, model string) (openAIBody []byte, finish 
 		} `json:"content"`
 		StopReason string `json:"stop_reason"`
 		Usage      struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
+			InputTokens              int `json:"input_tokens"` // the uncached remainder only
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+			OutputTokens             int `json:"output_tokens"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(raw, &a); err != nil {
@@ -392,6 +436,7 @@ func anthropicToOpenAIChat(raw []byte, model string) (openAIBody []byte, finish 
 		}
 	}
 
+	prompt := a.Usage.InputTokens + a.Usage.CacheCreationInputTokens + a.Usage.CacheReadInputTokens
 	result := map[string]any{
 		"id":      "chatcmpl-" + randomID(),
 		"object":  "chat.completion",
@@ -402,10 +447,18 @@ func anthropicToOpenAIChat(raw []byte, model string) (openAIBody []byte, finish 
 			"message":       msg,
 			"finish_reason": finish,
 		}},
+		// OpenAI's prompt_tokens is the whole prompt, cached part included;
+		// clients size the conversation by it (when to compact). OpenAI has no
+		// name for cache writes: cache_write_tokens is OpenRouter's, which annai
+		// reads to price them.
 		"usage": map[string]any{
-			"prompt_tokens":     a.Usage.InputTokens,
+			"prompt_tokens":     prompt,
 			"completion_tokens": a.Usage.OutputTokens,
-			"total_tokens":      a.Usage.InputTokens + a.Usage.OutputTokens,
+			"total_tokens":      prompt + a.Usage.OutputTokens,
+			"prompt_tokens_details": map[string]any{
+				"cached_tokens":      a.Usage.CacheReadInputTokens,
+				"cache_write_tokens": a.Usage.CacheCreationInputTokens,
+			},
 		},
 	}
 	return mustJSON(result), finish, hasContent
