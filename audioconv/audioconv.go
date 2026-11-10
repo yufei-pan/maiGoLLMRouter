@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"mime"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -28,6 +29,13 @@ const (
 	maxOutputBytes = 64 << 20
 	maxRunTime     = 60 * time.Second
 )
+
+// convSlots bounds the ffmpeg processes running at once. A conversion is
+// single-threaded and CPU-bound, so more runs than cores gain nothing, and each
+// holds about 15.5 MiB (measured: 200 concurrent conversions of a 37 KB FLAC
+// peaked at 3,104 MiB, so a leaked key could start thousands at once); at 32
+// cores the worst case is about 500 MiB.
+var convSlots = make(chan struct{}, runtime.NumCPU())
 
 type encoding struct {
 	args        []string
@@ -123,12 +131,19 @@ func WrapPCM(pcm []byte, rate int) []byte {
 
 // Convert re-encodes audio of contentType into format with ffmpeg, returning
 // the audio and its content type. Raw PCM is read as mono s16le at its stated
-// rate (Gemini's audio/L16 is little-endian too); anything else is probed. It
-// stops ffmpeg when ctx ends.
+// rate (Gemini's audio/L16 is little-endian too); anything else is probed. At
+// most one ffmpeg per core runs at once; a call waits for its turn, and gives up
+// with ctx's error if ctx ends first. It stops ffmpeg when ctx ends.
 func Convert(ctx context.Context, ffmpeg string, data []byte, contentType, format string) ([]byte, string, error) {
 	enc, ok := encodings[format]
 	if !ok {
 		return nil, "", fmt.Errorf("unknown speech format %q", format)
+	}
+	select {
+	case convSlots <- struct{}{}:
+		defer func() { <-convSlots }()
+	case <-ctx.Done():
+		return nil, "", ctx.Err()
 	}
 	// The input may come from a client: ffmpeg may read nothing but the pipe it
 	// is handed, and only as an audio container, never a playlist or a list

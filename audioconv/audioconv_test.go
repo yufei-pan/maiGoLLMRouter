@@ -4,9 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"math"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -213,5 +218,92 @@ func TestConvertDropsVideo(t *testing.T) {
 	}
 	if _, _, err := Convert(context.Background(), ffmpeg, makeVideoClip(t, ffmpeg, false), "audio/webm", "opus"); err == nil {
 		t.Error("a video-only upload should fail, not turn into a video")
+	}
+}
+
+// withSlots runs a test with n conversion slots instead of one per core.
+func withSlots(t *testing.T, n int) {
+	t.Helper()
+	old := convSlots
+	convSlots = make(chan struct{}, n)
+	t.Cleanup(func() { convSlots = old })
+}
+
+// TestConvertBoundsConcurrentRuns verifies no more than the slot count of
+// ffmpeg processes run at once: each fake ffmpeg records how many are alive
+// when it starts, then lives long enough for the others to overlap it.
+func TestConvertBoundsConcurrentRuns(t *testing.T) {
+	const slots = 2
+	withSlots(t, slots)
+	dir, logPath := t.TempDir(), t.TempDir()+"/counts"
+	script := fmt.Sprintf(`#!/bin/sh
+touch %[1]s/run.$$
+ls %[1]s | wc -l >> %[2]s
+sleep 0.3
+rm -f %[1]s/run.$$
+echo audio
+`, dir, logPath)
+	fake := t.TempDir() + "/ffmpeg"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for range slots + 1 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, _, err := Convert(context.Background(), fake, sine(1), "audio/pcm", "opus"); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peak, runs := 0, 0
+	for _, line := range strings.Fields(string(raw)) {
+		n, _ := strconv.Atoi(line)
+		peak, runs = max(peak, n), runs+1
+	}
+	if runs != slots+1 {
+		t.Errorf("%d runs recorded, want %d", runs, slots+1)
+	}
+	if peak != slots {
+		t.Errorf("peak of %d ffmpeg alive at once, want exactly %d", peak, slots)
+	}
+}
+
+// TestConvertWaiterHonorsContext verifies a conversion waiting for a slot
+// gives up with its context's error, without starting ffmpeg.
+func TestConvertWaiterHonorsContext(t *testing.T) {
+	withSlots(t, 1)
+	convSlots <- struct{}{} // the only slot is busy
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, _, err := Convert(ctx, "/nonexistent/ffmpeg", sine(1), "audio/pcm", "opus")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want the context's deadline error and no attempt to start ffmpeg", err)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Errorf("took %v to give up", d)
+	}
+	if len(convSlots) != 1 {
+		t.Errorf("%d slots held, want only the busy one", len(convSlots))
+	}
+}
+
+// TestConvertReleasesSlot verifies a finished conversion, failed or not, frees its slot.
+func TestConvertReleasesSlot(t *testing.T) {
+	withSlots(t, 1)
+	for range 3 {
+		if _, _, err := Convert(context.Background(), "/nonexistent/ffmpeg", sine(1), "audio/pcm", "opus"); err == nil {
+			t.Fatal("want an error without ffmpeg")
+		}
+	}
+	if len(convSlots) != 0 {
+		t.Errorf("%d slots still held", len(convSlots))
 	}
 }
