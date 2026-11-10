@@ -95,6 +95,19 @@ func TestRenderSandboxDirectives(t *testing.T) {
 	}
 }
 
+// TestRenderMemoryCap verifies the unit caps the service's memory, so a runaway
+// restarts the router instead of starving the host, with swap equal to the cap.
+func TestRenderMemoryCap(t *testing.T) {
+	lines := unitLines(renderSystemdUnit(systemdUnitParams{ExecPath: "/opt/router/r", ConfigPath: "/etc/router/config.toml"}))
+	service, install := slices.Index(lines, "[Service]"), slices.Index(lines, "[Install]")
+	for _, want := range []string{"MemoryMax=6G", "MemorySwapMax=6G"} {
+		i := slices.Index(lines, want)
+		if i < service || i > install {
+			t.Errorf("[Service] lacks the whole line %q", want)
+		}
+	}
+}
+
 func TestRenderRequiresMountsQuotes(t *testing.T) {
 	unit := renderSystemdUnit(systemdUnitParams{
 		ExecPath:   `/opt/my router/r`,

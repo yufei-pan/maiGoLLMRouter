@@ -12,8 +12,8 @@ Reviewers read this file first, and raise an entry again only with new evidence 
 
 ### Per-key disk and rate quotas
 - **Kind:** deferred, to the next version (decision 6).
-- **What the operator sees:** nothing limits what one client key does over time. A leaked key can fill the log disk and spend provider credit at any rate the memory budget allows. Until then, removing the key from `client_keys` and reloading stops it.
-- **Why:** this version bounds what one request can hold (body size and arrival time, JSON values, the memory budget, stalled replies). Quotas over time need per-key accounting and config, a piece of work of their own.
+- **What the operator sees:** nothing limits what one client key does over time. A leaked key can fill the log disk and spend provider credit at any rate the memory budget allows. It can also hold memory: bodies are read before they are admitted to the decode budget, so each stalled upload connection holds up to about 43 MiB of RAM (measured: 24 uploads stalled one byte short of 32 MiB held 1,064 MiB RSS) for up to 5 minutes, outside that budget. Until the quotas exist, removing the key from `client_keys` and reloading stops it, and the generated unit's `MemoryMax=6G` turns a memory runaway into a router restart.
+- **Why:** this version bounds what one request can hold (body size and arrival time, JSON values, the memory budget, stalled replies). Quotas over time need per-key accounting and config, a piece of work of their own. The planned memory fix is a second budget over declared upload bytes, admitted before the body is read.
 - **Revisit when:** the next version.
 
 ### DNS rebinding against the UI

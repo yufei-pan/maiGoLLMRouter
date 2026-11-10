@@ -144,6 +144,14 @@ var sandboxDirectives = []string{
 	"UMask=0077",
 }
 
+// memoryCap is the unit's MemoryMax= and MemorySwapMax=: twice the 3 GiB the
+// router's decode budget is sized to peak at (memoryBudget in server/budget.go),
+// the usual cap sizing, so a runaway restarts the router instead of starving the
+// host. Bodies are read before they are admitted to that budget, so stalled
+// uploads add memory the budget doesn't count (see docs/limitations.md). The swap
+// limit equals the cap so the kernel can still page the router out under pressure.
+const memoryCap = "6G"
+
 func renderSystemdUnit(p systemdUnitParams) string {
 	var b strings.Builder
 	b.WriteString("[Unit]\n")
@@ -187,6 +195,7 @@ func renderSystemdUnit(p systemdUnitParams) string {
 	for _, d := range sandboxDirectives {
 		b.WriteString(d + "\n")
 	}
+	fmt.Fprintf(&b, "MemoryMax=%s\nMemorySwapMax=%s\n", memoryCap, memoryCap)
 	b.WriteString("\n")
 
 	b.WriteString("[Install]\n")
