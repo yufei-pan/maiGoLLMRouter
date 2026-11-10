@@ -2,9 +2,7 @@ package provider
 
 import (
 	"context"
-	"fmt"
 	"net/http"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -210,20 +208,6 @@ func TestCallStreamGeminiResponses(t *testing.T) {
 	content, _ := msg["content"].([]any)
 	if part, _ := content[0].(map[string]any); part["text"] != "Hi there" {
 		t.Errorf("final output = %v", out)
-	}
-}
-
-func TestCallStreamAnthropicIsBuffered(t *testing.T) {
-	srv := streamServer(t, nil, func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
-	})
-	req := Request{Op: OpChat, Model: "claude", Body: geminiChatBodyForStream(false)}
-	s, resp, err := CallStream(context.Background(), &http.Client{}, "anthropic", srv.URL, "k", time.Minute, req)
-	if err != nil || s != nil || resp == nil || !resp.OK() {
-		t.Fatalf("want a buffered Response, got stream=%v resp=%+v err=%v", s, resp, err)
-	}
-	if !reflect.DeepEqual(resp.FinishReason, "stop") {
-		t.Errorf("finish = %q", resp.FinishReason)
 	}
 }
 

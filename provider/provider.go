@@ -134,7 +134,11 @@ func CallStream(ctx context.Context, client *http.Client, kind, baseURL, apiKey 
 	case kind == "gemini" && req.Op == OpChat:
 		stream, resp, err = geminiChatStream(ctx, client, baseURL, apiKey, timeout, req, WantsUsage(req.Body))
 	case kind == "gemini" && req.Op == OpResponses:
-		stream, resp, err = geminiResponsesStream(ctx, client, baseURL, apiKey, timeout, req)
+		stream, resp, err = responsesOverChatStream(ctx, geminiChatStream, client, baseURL, apiKey, timeout, req)
+	case kind == "anthropic" && req.Op == OpChat:
+		stream, resp, err = anthropicChatStream(ctx, client, baseURL, apiKey, timeout, req, WantsUsage(req.Body))
+	case kind == "anthropic" && req.Op == OpResponses:
+		stream, resp, err = responsesOverChatStream(ctx, anthropicChatStream, client, baseURL, apiKey, timeout, req)
 	default:
 		if timeout > 0 {
 			var cancel context.CancelFunc
@@ -150,9 +154,12 @@ func CallStream(ctx context.Context, client *http.Client, kind, baseURL, apiKey 
 	return stream, resp, err
 }
 
-// geminiResponsesStream serves a portable Responses request over Gemini's
-// chat stream, re-emitted as Responses events.
-func geminiResponsesStream(ctx context.Context, client *http.Client, baseURL, apiKey string, timeout time.Duration, req Request) (*Stream, *Response, error) {
+// chatStreamFunc opens a translated dialect's Chat stream.
+type chatStreamFunc func(ctx context.Context, client *http.Client, baseURL, apiKey string, timeout time.Duration, req Request, forwardUsage bool) (*Stream, *Response, error)
+
+// responsesOverChatStream serves a portable Responses request over a
+// translated dialect's Chat stream, re-emitted as Responses events.
+func responsesOverChatStream(ctx context.Context, chatStream chatStreamFunc, client *http.Client, baseURL, apiKey string, timeout time.Duration, req Request) (*Stream, *Response, error) {
 	if err := PortableForChat(req.Body); err != nil {
 		return nil, &Response{Incompatible: true}, nil
 	}
@@ -162,7 +169,7 @@ func geminiResponsesStream(ctx context.Context, client *http.Client, baseURL, ap
 	}
 	chatReq := req
 	chatReq.Op, chatReq.Body = OpChat, chatBody
-	s, resp, err := geminiChatStream(ctx, client, baseURL, apiKey, timeout, chatReq, true)
+	s, resp, err := chatStream(ctx, client, baseURL, apiKey, timeout, chatReq, true)
 	if s != nil {
 		return chatToResponses(s, req.Model), nil, nil
 	}

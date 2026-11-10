@@ -34,12 +34,6 @@ Reviewers read this file first, and raise an entry again only with new evidence 
 - **Why:** both layouts are unusual (the usual `/usr/bin/ffmpeg` is a real file), and the problem predates this change.
 - **Revisit when:** the next version. The fix: judge ffmpeg where the service finds it (a relative path joined to `WorkingDirectory`, a bare name looked up on systemd's default PATH).
 
-### Claude replies are not streamed
-- **Kind:** deferred, to the next version (the change right after this one; the user chose "Effort now, streaming next", 2026-11-10).
-- **What the operator sees:** a streamed request to an Anthropic-kind target gets nothing until Anthropic's whole reply is in; then it arrives as one burst of chunks. A long turn at high effort shows no progress, and a client that gives up after a silence (opencode's `chunkTimeout`, a proxy's idle timeout) may cut it off.
-- **Why:** the Anthropic dialect calls the Messages API without streaming and replays the finished reply as a stream (`provider.CallStream`'s default branch).
-- **Revisit when:** the next version: stream the Messages API and translate its events (text, tool-call arguments, thinking, usage) into Chat chunks, as the Gemini dialect does.
-
 ### Gemini targets reject reasoning_effort
 - **Kind:** deferred, to the next version.
 - **What the operator sees:** a request with OpenAI's `reasoning_effort` that reaches a Gemini-kind target gets 400 "Unknown name \"reasoning_effort\" at 'generation_config'", so a target list that mixes Gemini with other providers fails over past Gemini whenever the client sets effort.

@@ -54,12 +54,8 @@ func callAnthropic(ctx context.Context, client *http.Client, baseURL, apiKey str
 	body := buildAnthropicBody(req)
 	url := baseURL + "/messages"
 	out := mustJSON(body)
-	headers := map[string]string{
-		"x-api-key":         apiKey,
-		"anthropic-version": anthropicVersion,
-	}
 
-	status, raw, err := doJSON(ctx, client, http.MethodPost, url, headers, out)
+	status, raw, err := doJSON(ctx, client, http.MethodPost, url, anthropicHeaders(apiKey), out)
 	resp := &Response{HTTPStatus: status, OutboundURL: url, OutboundBody: out, RawResponse: raw}
 	if err != nil {
 		resp.OpenAIBody = raw
@@ -69,11 +65,21 @@ func callAnthropic(ctx context.Context, client *http.Client, baseURL, apiKey str
 		resp.OpenAIBody = raw
 		return resp, nil
 	}
-	openAIBody, finish, hasContent := anthropicToOpenAIChat(raw, req.Model)
-	resp.OpenAIBody = openAIBody
-	resp.FinishReason = finish
-	resp.HasContent = hasContent
+	anthropicJSONReply(resp, req.Model)
 	return resp, nil
+}
+
+func anthropicHeaders(apiKey string) map[string]string {
+	return map[string]string{"x-api-key": apiKey, "anthropic-version": anthropicVersion}
+}
+
+// anthropicJSONReply judges a 2xx Messages reply that came back whole. A
+// refusal is a policy block, as it is on a stream.
+func anthropicJSONReply(resp *Response, model string) {
+	resp.OpenAIBody, resp.FinishReason, resp.HasContent = anthropicToOpenAIChat(resp.RawResponse, model)
+	if resp.FinishReason == "content_filter" {
+		resp.Prohibited = true
+	}
 }
 
 func buildAnthropicBody(req Request) map[string]any {
@@ -392,13 +398,8 @@ func anthropicToOpenAIChat(raw []byte, model string) (openAIBody []byte, finish 
 			Name  string          `json:"name"`
 			Input json.RawMessage `json:"input"`
 		} `json:"content"`
-		StopReason string `json:"stop_reason"`
-		Usage      struct {
-			InputTokens              int `json:"input_tokens"` // the uncached remainder only
-			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
-			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
-			OutputTokens             int `json:"output_tokens"`
-		} `json:"usage"`
+		StopReason string         `json:"stop_reason"`
+		Usage      anthropicUsage `json:"usage"`
 	}
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return raw, "", false
@@ -436,7 +437,6 @@ func anthropicToOpenAIChat(raw []byte, model string) (openAIBody []byte, finish 
 		}
 	}
 
-	prompt := a.Usage.InputTokens + a.Usage.CacheCreationInputTokens + a.Usage.CacheReadInputTokens
 	result := map[string]any{
 		"id":      "chatcmpl-" + randomID(),
 		"object":  "chat.completion",
@@ -447,23 +447,40 @@ func anthropicToOpenAIChat(raw []byte, model string) (openAIBody []byte, finish 
 			"message":       msg,
 			"finish_reason": finish,
 		}},
-		// OpenAI's prompt_tokens is the whole prompt, cached part included;
-		// clients size the conversation by it (when to compact). OpenAI has no
-		// name for cache writes: cache_write_tokens is OpenRouter's, which annai
-		// reads to price them.
-		"usage": map[string]any{
-			"prompt_tokens":     prompt,
-			"completion_tokens": a.Usage.OutputTokens,
-			"total_tokens":      prompt + a.Usage.OutputTokens,
-			"prompt_tokens_details": map[string]any{
-				"cached_tokens":      a.Usage.CacheReadInputTokens,
-				"cache_write_tokens": a.Usage.CacheCreationInputTokens,
-			},
-		},
+		"usage": a.Usage.openAI(),
 	}
 	return mustJSON(result), finish, hasContent
 }
 
+// anthropicUsage is Anthropic's token count for one reply.
+type anthropicUsage struct {
+	InputTokens              int `json:"input_tokens"` // the uncached remainder only
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+}
+
+// openAI is the usage in OpenAI's meaning, for a whole reply and a stream's
+// usage chunk alike. OpenAI's prompt_tokens is the whole prompt, cached part
+// included; clients size the conversation by it (when to compact). OpenAI has
+// no name for cache writes: cache_write_tokens is OpenRouter's, which annai
+// reads to price them.
+func (u anthropicUsage) openAI() map[string]any {
+	prompt := u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
+	return map[string]any{
+		"prompt_tokens":     prompt,
+		"completion_tokens": u.OutputTokens,
+		"total_tokens":      prompt + u.OutputTokens,
+		"prompt_tokens_details": map[string]any{
+			"cached_tokens":      u.CacheReadInputTokens,
+			"cache_write_tokens": u.CacheCreationInputTokens,
+		},
+	}
+}
+
+// normalizeAnthropicFinish maps a stop_reason to OpenAI's finish_reason. A
+// refusal (Anthropic's safety classifiers declined, before or during the
+// reply) is OpenAI's content_filter.
 func normalizeAnthropicFinish(r string) string {
 	switch r {
 	case "end_turn", "stop_sequence":
@@ -472,6 +489,8 @@ func normalizeAnthropicFinish(r string) string {
 		return "length"
 	case "tool_use":
 		return "tool_calls"
+	case "refusal":
+		return "content_filter"
 	case "":
 		return ""
 	default:
