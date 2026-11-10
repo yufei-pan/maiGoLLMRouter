@@ -176,6 +176,15 @@ func buildAnthropicBody(req Request) map[string]any {
 				body["output_config"] = merged
 			}
 		}
+		// A request that sets an effort asks for reasoning, so ask Anthropic
+		// to show it as a summary (no extra tokens). Claude Opus 5.5 otherwise
+		// leaves the thinking out, and at max effort it thought 277 s with
+		// nothing to send (tested 2026-11-10): past opencode's 300 s wait for
+		// a reply to start. Summaries streamed from 2.2 s, never 3.1 s apart.
+		// A thinking setting the client sent itself wins.
+		if _, set := body["thinking"]; !set {
+			body["thinking"] = map[string]any{"type": "adaptive", "display": "summarized"}
+		}
 	}
 	return body
 }

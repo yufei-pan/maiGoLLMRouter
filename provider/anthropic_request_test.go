@@ -53,6 +53,26 @@ func TestAnthropicReasoningEffortBecomesOutputConfigEffort(t *testing.T) {
 	}
 }
 
+// With an effort set, the router asks for summarized thinking, so a long think
+// streams progress instead of nothing; a client's own thinking setting wins,
+// and a request without an effort is left as it was.
+func TestAnthropicEffortAsksForSummarizedThinking(t *testing.T) {
+	got := anthropicBodyFor(t, `{"messages": [{"role": "user", "content": "hi"}], "reasoning_effort": "xhigh"}`)
+	th, _ := got["thinking"].(map[string]any)
+	if th["type"] != "adaptive" || th["display"] != "summarized" {
+		t.Errorf("thinking = %v, want adaptive and summarized", got["thinking"])
+	}
+	got = anthropicBodyFor(t, `{"messages": [{"role": "user", "content": "hi"}], "reasoning_effort": "high",
+		"thinking": {"type": "adaptive", "display": "omitted"}}`)
+	if th := got["thinking"].(map[string]any); th["display"] != "omitted" {
+		t.Errorf("thinking = %v, want the client's own omitted", th)
+	}
+	got = anthropicBodyFor(t, `{"messages": [{"role": "user", "content": "hi"}]}`)
+	if _, has := got["thinking"]; has {
+		t.Errorf("thinking = %v, want none without an effort", got["thinking"])
+	}
+}
+
 func TestAnthropicOwnOutputConfigEffortWins(t *testing.T) {
 	got := anthropicBodyFor(t, `{"messages": [{"role": "user", "content": "hi"}],
 		"reasoning_effort": "low", "output_config": {"effort": "max"}}`)

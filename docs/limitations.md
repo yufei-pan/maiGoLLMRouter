@@ -50,4 +50,10 @@ Reviewers read this file first, and raise an entry again only with new evidence 
 - **Kind:** deferred, to the next version (with Claude streaming).
 - **What the operator sees:** through the router, Claude Opus 5.5 answers `tool_choice: "required"` (or a named function) with 400 "tool_choice: type \"tool\" and \"any\" are not supported for this model", and any `temperature` other than 1 with 400 "`temperature` is deprecated for this model" (both tested 2026-11-10). annai's `requireTool` sends `"required"`.
 - **Why:** the Anthropic dialect translates these fields as older models take them; which models refuse them differs by model, and this change didn't touch them.
-- **Revisit when:** the next version, with the Claude streaming change.
+- **Revisit when:** the next version (it was left out of the Claude streaming change, which only translates the stream).
+
+### Non-streamed Claude replies drop the thinking text
+- **Kind:** deferred, to the next version.
+- **What the operator sees:** a streamed Claude reply carries its thinking summary as `reasoning_content`; the same request without `stream` gets the answer only (`anthropicToOpenAIChat` skips `thinking` blocks), and the log holds no reasoning for it.
+- **Why:** found in the review of the streaming change; the non-streamed translation predates thinking summaries and this change didn't touch it.
+- **Revisit when:** the next version.
