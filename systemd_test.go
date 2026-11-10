@@ -234,6 +234,63 @@ func TestGenerateResolvesLogDir(t *testing.T) {
 	})
 }
 
+// TestGenerateResolvesSymlinks verifies a run from a symlinked directory
+// writes the real paths into the unit: a dedicated user may be unable to
+// traverse the link (a mode-700 home), and ProtectHome must judge where the
+// files really are.
+func TestGenerateResolvesSymlinks(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(root, "home") // stands in for /home: the real files are under it, the link is not
+	realDir := filepath.Join(home, "svc")
+	link := filepath.Join(root, "link")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(realDir, "ffmpeg"), nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := homeDirs
+	homeDirs = []string{home}
+	t.Cleanup(func() { homeDirs = old })
+
+	for name, cfg := range map[string]string{
+		"relative log_dir": fmt.Sprintf("[server]\nclient_keys = [\"sk-test\"]\nffmpeg = %q\n", filepath.Join(link, "ffmpeg")),
+		"absolute log_dir that doesn't exist yet": fmt.Sprintf("[server]\nclient_keys = [\"sk-test\"]\nlog_dir = %q\nffmpeg = %q\n",
+			filepath.Join(link, "new", "logs"), filepath.Join(link, "ffmpeg")),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(filepath.Join(realDir, "config.toml"), []byte(cfg), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			p, err := resolveSystemdParams(filepath.Join(link, "config.toml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantLogDir := filepath.Join(realDir, "logs")
+			if strings.Contains(name, "absolute") {
+				wantLogDir = filepath.Join(realDir, "new", "logs")
+			}
+			if p.WorkingDirectory != realDir || p.ConfigPath != filepath.Join(realDir, "config.toml") ||
+				p.LogDir != wantLogDir || p.FFmpeg != filepath.Join(realDir, "ffmpeg") {
+				t.Errorf("params = %+v, want the paths under %s", p, realDir)
+			}
+			unit := renderSystemdUnit(p)
+			if strings.Contains(unit, link) {
+				t.Errorf("unit holds the symlink path %s:\n%s", link, unit)
+			}
+			if !slices.Contains(unitLines(unit), "ProtectHome=read-only") {
+				t.Errorf("ProtectHome was not judged from the real paths:\n%s", unit)
+			}
+		})
+	}
+}
+
 func TestGenerateUnreadableConfig(t *testing.T) {
 	t.Chdir(t.TempDir())
 	cfgPath := writeConfig(t, "[server\n")

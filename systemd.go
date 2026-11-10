@@ -25,11 +25,15 @@ type systemdUnitParams struct {
 	Group            string
 }
 
-// underHome reports whether path is /home, /root, or below either: the
-// directories ProtectHome= hides ("/homework" is not one of them).
+// homeDirs are the directories ProtectHome= hides (a variable so a test can
+// stand in a directory it owns).
+var homeDirs = []string{"/home", "/root"}
+
+// underHome reports whether path is one of homeDirs or below one ("/homework"
+// is not under "/home").
 func underHome(path string) bool {
 	path = filepath.Clean(path)
-	for _, home := range []string{"/home", "/root"} {
+	for _, home := range homeDirs {
 		if path == home || strings.HasPrefix(path, home+"/") {
 			return true
 		}
@@ -66,17 +70,40 @@ func systemdNotes(p systemdUnitParams) []string {
 	return notes
 }
 
+// resolvePath makes path absolute and resolves its symlinks, as far as it
+// exists: a log directory not created yet keeps its own last parts. The unit
+// must hold real paths: the service's user may be unable to traverse a link (one
+// in a mode-700 home), and ProtectHome= must be chosen from where the files are.
+func resolvePath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	rest := ""
+	for p := abs; ; {
+		if real, err := filepath.EvalSymlinks(p); err == nil {
+			return filepath.Join(real, rest), nil
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return abs, nil
+		}
+		rest = filepath.Join(filepath.Base(p), rest)
+		p = parent
+	}
+}
+
 func resolveSystemdParams(configPath string) (systemdUnitParams, error) {
 	execPath, err := os.Executable()
 	if err != nil {
 		execPath = os.Args[0]
 	}
-	execAbs, err := filepath.Abs(execPath)
+	execAbs, err := resolvePath(execPath)
 	if err != nil {
 		return systemdUnitParams{}, fmt.Errorf("executable path: %w", err)
 	}
 
-	cfgAbs, err := filepath.Abs(configPath)
+	cfgAbs, err := resolvePath(configPath)
 	if err != nil {
 		return systemdUnitParams{}, fmt.Errorf("config path: %w", err)
 	}
@@ -117,12 +144,19 @@ func resolveSystemdParams(configPath string) (systemdUnitParams, error) {
 		return p, nil
 	}
 	p.FFmpeg = cfg.Server.FFmpeg
+	if filepath.IsAbs(p.FFmpeg) {
+		if p.FFmpeg, err = resolvePath(p.FFmpeg); err != nil {
+			return systemdUnitParams{}, fmt.Errorf("ffmpeg path: %w", err)
+		}
+	}
 	// The service resolves a relative log_dir against its working directory.
 	logDir := cfg.Server.LogDir
 	if !filepath.IsAbs(logDir) {
 		logDir = filepath.Join(workDir, logDir)
 	}
-	p.LogDir = filepath.Clean(logDir)
+	if p.LogDir, err = resolvePath(logDir); err != nil {
+		return systemdUnitParams{}, fmt.Errorf("log directory: %w", err)
+	}
 	return p, nil
 }
 
