@@ -113,6 +113,63 @@ client_keys = ["sk-test"]
 	}
 }
 
+// freeAddr returns a loopback address nothing listens on right now.
+func freeAddr(t *testing.T) string {
+	t.Helper()
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer probe.Close()
+	return probe.Addr().String()
+}
+
+// TestServePairsAnswersUIOnlyOnListen verifies, through the pairing main
+// serves and real bound listeners, that the web UI (which has no auth) answers
+// on listen and never on api_listen: swapping the two handlers must fail here.
+func TestServePairsAnswersUIOnlyOnListen(t *testing.T) {
+	listen, apiListen := freeAddr(t), freeAddr(t)
+	cfg := loadConfig(t, writeConfig(t, `
+[server]
+client_keys = ["sk-test"]
+listen = "`+listen+`"
+api_listen = "`+apiListen+`"
+`))
+	logs, err := logstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := inflight.New()
+	pairs, err := servePairs(cfg, server.New(cfg, router.New(cfg), logs, active), logs, active)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pairs) != 2 {
+		t.Fatalf("%d listeners, want listen and api_listen", len(pairs))
+	}
+	for _, p := range pairs {
+		srv := server.NewHTTPServer(p.h, server.DefaultConnLimits)
+		go srv.Serve(p.ln)
+		t.Cleanup(func() { srv.Close(); p.ln.Close() })
+	}
+
+	for addr, want := range map[string]struct{ ui, healthz int }{
+		listen:    {http.StatusOK, http.StatusOK},
+		apiListen: {http.StatusNotFound, http.StatusOK},
+	} {
+		for path, wantStatus := range map[string]int{"/ui": want.ui, "/healthz": want.healthz} {
+			resp, err := http.Get("http://" + addr + path)
+			if err != nil {
+				t.Fatalf("GET %s%s: %v", addr, path, err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != wantStatus {
+				t.Errorf("GET %s%s: status %d, want %d", addr, path, resp.StatusCode, wantStatus)
+			}
+		}
+	}
+}
+
 func TestListenAllSameAddressFails(t *testing.T) {
 	probe, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

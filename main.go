@@ -93,9 +93,8 @@ func main() {
 	startSignalReload(reloader.tryReload)
 	reloader.startWatch(cfg.Server.ConfigReloadInterval)
 
-	fullHandler, apiHandler := buildHandlers(srv, logs, active)
 	// Bind both before serving either, so a bad api_listen stops the start.
-	fullLn, apiLn, err := listenAll(cfg)
+	pairs, err := servePairs(cfg, srv, logs, active)
 	if err != nil {
 		log.Fatalf("server: %v", err)
 	}
@@ -104,17 +103,36 @@ func main() {
 	log.Printf("config reload: SIGHUP / systemctl reload; auto poll every %s (set config_reload_interval = \"0\" to disable polling)", formatReloadInterval(cfg.Server.ConfigReloadInterval))
 
 	// Serve only returns on a failure, and either server failing ends the
-	// process: there is no graceful shutdown. One slot per server, so neither
-	// send ever blocks.
-	errc := make(chan error, 2)
-	serve := func(h http.Handler, ln net.Listener) {
-		errc <- server.NewHTTPServer(h, server.DefaultConnLimits).Serve(ln)
-	}
-	go serve(fullHandler, fullLn)
-	if apiLn != nil {
-		go serve(apiHandler, apiLn)
+	// process: there is no graceful shutdown. One slot per server, so no send
+	// ever blocks.
+	errc := make(chan error, len(pairs))
+	for _, p := range pairs {
+		go func() { errc <- server.NewHTTPServer(p.h, server.DefaultConnLimits).Serve(p.ln) }()
 	}
 	log.Fatalf("server: %v", <-errc)
+}
+
+// served is a bound listener and the handler that answers on it.
+type served struct {
+	ln net.Listener
+	h  http.Handler
+}
+
+// servePairs binds the listeners and pairs each with its handler: listen with
+// the full one, api_listen (when set) with the API-only one. The pairing is
+// what keeps the unauthenticated web UI off api_listen, so it is one function
+// that main serves and a test exercises.
+func servePairs(cfg *config.Config, srv *server.Server, logs *logstore.Store, active *inflight.Registry) ([]served, error) {
+	fullHandler, apiHandler := buildHandlers(srv, logs, active)
+	fullLn, apiLn, err := listenAll(cfg)
+	if err != nil {
+		return nil, err
+	}
+	pairs := []served{{fullLn, fullHandler}}
+	if apiLn != nil {
+		pairs = append(pairs, served{apiLn, apiHandler})
+	}
+	return pairs, nil
 }
 
 // buildHandlers returns the handler for listen (the API, /healthz and the web
