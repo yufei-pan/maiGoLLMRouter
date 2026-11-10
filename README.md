@@ -74,8 +74,9 @@ internet-facing proxy at it.
 After you install the binary and `config.toml` where you want them to live
 (e.g. `/usr/local/bin/maiGoLLMRouter` and `/etc/maiGoLLMRouter/config.toml`), run
 `--generate-systemd` from the directory where you want the unit file written.
-It resolves absolute paths for `ExecStart`, `WorkingDirectory` (the config's
-directory), and your current login `User`/`Group`:
+It resolves absolute paths, following symlinks, for `ExecStart`,
+`WorkingDirectory` (the config's directory), and your current login
+`User`/`Group`:
 
 ```bash
 ./maiGoLLMRouter --generate-systemd -f /etc/maiGoLLMRouter/config.toml
@@ -93,6 +94,10 @@ This writes `./mai-go-llm-router.service`. The unit is sandboxed:
   path is under `/home` or `/root`.
 - `RequiresMountsFor=` the binary, config and log directory, so a service on a
   separate disk waits for it.
+- Memory is capped with `MemoryMax=6G` and `MemorySwapMax=6G`: twice the 3 GiB
+  the router's request-body memory budget is sized to peak at, the usual cap
+  sizing, so a runaway restarts the router instead of starving the host. Swap
+  equals the cap so the kernel can still page the router out.
 - The rest is in the unit: no new privileges and no capabilities, a private
   `/tmp` and `/dev`, only IP and Unix sockets, `UMask=0077`, and more.
 
@@ -120,11 +125,15 @@ everything the service uses (binary, config, log directory, an absolute
 `ffmpeg` path) outside home directories, where that user can reach it and the
 unit can hide homes.
 
-Create the user, let its group read the config (it holds every key), and give
-it the log directory. From the directory that holds `config.toml`, where the
-default `log_dir = "./logs"` lives (use your `log_dir` if it is elsewhere):
+Stop the service first, so the root service creates no file or day directory
+while you change ownership: one made in between stays root-owned, the new user
+can't write that day's directory, and log writes fail silently. Then create the
+user, let its group read the config (it holds every key), and give it the log
+directory. From the directory that holds `config.toml`, where the default
+`log_dir = "./logs"` lives (use your `log_dir` if it is elsewhere):
 
 ```bash
+sudo systemctl stop mai-go-llm-router
 sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin mai-go-llm-router
 sudo mkdir -p logs
 sudo chgrp mai-go-llm-router config.toml
@@ -135,16 +144,20 @@ sudo find logs -type d -exec chmod 700 {} +
 ```
 
 The router creates log files 0600 and directories 0700, but files written
-before keep their modes, hence the two `find`s. Then re-run
-`--generate-systemd` as that user (from a directory it can write), or edit
-`User=` and `Group=` in the installed unit, and restart:
+before keep their modes, hence the two `find`s. If you haven't installed the
+generated unit yet, do the `cp` and `enable` above (`enable` without `--now`,
+so it doesn't start as root). Then set its user and group, and start the
+service:
 
 ```bash
-cd /tmp && sudo -u mai-go-llm-router /usr/local/bin/maiGoLLMRouter --generate-systemd -f /etc/maiGoLLMRouter/config.toml
-sudo cp /tmp/mai-go-llm-router.service /etc/systemd/system/
+sudo sed -i 's/^User=.*/User=mai-go-llm-router/; s/^Group=.*/Group=mai-go-llm-router/' /etc/systemd/system/mai-go-llm-router.service
 sudo systemctl daemon-reload
-sudo systemctl restart mai-go-llm-router
+sudo systemctl start mai-go-llm-router
 ```
+
+The generated unit drops all capabilities (`CapabilityBoundingSet=`), so
+`listen` and `api_listen` need ports above 1023. It also holds the service to
+`MemoryMax=6G` and `MemorySwapMax=6G`: leave that much free memory and swap.
 
 ### Example request
 
