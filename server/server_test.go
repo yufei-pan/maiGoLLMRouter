@@ -9,9 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"maiGoLLMRouter/config"
+	"maiGoLLMRouter/inflight"
+	"maiGoLLMRouter/logstore"
 	"maiGoLLMRouter/router"
 )
 
@@ -250,5 +254,130 @@ func TestCORSCanBeTurnedOffOrLimited(t *testing.T) {
 	}
 	if rec := preflight(limited, "/v1/chat/completions", "https://other.example"); rec.Header().Get("Access-Control-Allow-Origin") != "" {
 		t.Error("an origin not listed gets no allow header")
+	}
+}
+
+// The in-flight view and the index show a chat request's text, taken from the
+// body the handler decoded.
+func TestChatPreviewFromDecodedBody(t *testing.T) {
+	arrived, release := make(chan struct{}, 1), make(chan struct{})
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		select {
+		case arrived <- struct{}{}:
+		default:
+		}
+		<-release
+		fmt.Fprint(w, `{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}]}`)
+	}))
+	defer backend.Close()
+	var once sync.Once
+	releaseBackend := func() { once.Do(func() { close(release) }) }
+	defer releaseBackend() // before backend.Close, which waits for the handler
+
+	cfg := loadCfg(t, fmt.Sprintf(`
+[server]
+client_keys = ["sk-test"]
+
+[[provider]]
+name = "openai"
+kind = "openai"
+base_url = %q
+keys = ["sk-upstream"]
+
+[model."m"]
+targets = ["openai/real-model"]
+`, backend.URL))
+	logs, err := logstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := inflight.New()
+	mux := http.NewServeMux()
+	New(cfg, router.New(cfg), logs, active).Register(mux)
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	raw := `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
+	status := make(chan int, 1)
+	go func() {
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/chat/completions", strings.NewReader(raw))
+		req.Header.Set("Authorization", "Bearer sk-test")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			status <- 0
+			return
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		status <- resp.StatusCode
+	}()
+	select {
+	case <-arrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the request never reached the provider")
+	}
+	live := active.Snapshot()
+	if len(live) != 1 {
+		t.Fatalf("%d requests in flight, want 1", len(live))
+	}
+	if want := logstore.EstimateInTokens(json.RawMessage(raw)); live[0].RequestPreview != "hi" || live[0].InTokens != want {
+		t.Errorf("in flight: preview %q, in tokens %d; want %q, %d", live[0].RequestPreview, live[0].InTokens, "hi", want)
+	}
+	releaseBackend()
+	if code := <-status; code != http.StatusOK {
+		t.Fatalf("status %d", code)
+	}
+	lastLog(t, logs)
+	if got := logs.Recent()[0].RequestPreview; got != "hi" {
+		t.Errorf("index preview %q, want %q", got, "hi")
+	}
+}
+
+// A speech request's index row shows the start of its input, as before.
+func TestSpeechIndexPreviewUnchanged(t *testing.T) {
+	logs, err := logstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := audioServer(t, `ffmpeg = "/nonexistent/ffmpeg"`, openAIBlock(pcmBackend(t).URL), logs)
+	resp := post(t, ts, "/v1/audio/speech", `{"model":"m","input":"hello world, this is long"}`)
+	_, _ = io.ReadAll(resp.Body)
+	lastLog(t, logs)
+	if got := logs.Recent()[0].RequestPreview; got != "hello world, thi" {
+		t.Errorf("index preview %q, want %q", got, "hello world, thi")
+	}
+}
+
+// A chat request with an audio clip is logged with the clip described, not
+// its bytes, and its index row shows the request's text.
+func TestAudioChatLogScrubbedFromBody(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"heard"}}]}`)
+	}))
+	defer backend.Close()
+	logs, err := logstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"what is this"},{"type":"input_audio","input_audio":{"data":"QUJD","format":"wav"}}]}]}`
+	resp := post(t, routerServer(t, backend.URL, "", logs), "/v1/chat/completions", body)
+	_, _ = io.ReadAll(resp.Body)
+	logged, _ := json.Marshal(lastLog(t, logs)["request"])
+	var req struct {
+		Messages []struct {
+			Content []struct {
+				InputAudio struct {
+					Data string `json:"data"`
+				} `json:"input_audio"`
+			} `json:"content"`
+		} `json:"messages"`
+	}
+	_ = json.Unmarshal(logged, &req)
+	if strings.Contains(string(logged), "QUJD") || len(req.Messages) != 1 || len(req.Messages[0].Content) != 2 || req.Messages[0].Content[1].InputAudio.Data != "<3 bytes audio/wav>" {
+		t.Errorf("logged request = %s", logged)
+	}
+	if got := logs.Recent()[0].RequestPreview; got != "what is this" {
+		t.Errorf("index preview %q, want %q", got, "what is this")
 	}
 }

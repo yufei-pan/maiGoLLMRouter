@@ -85,10 +85,12 @@ func (s *Server) handleSpeech(w http.ResponseWriter, r *http.Request) {
 	const endpoint = "/v1/audio/speech"
 	ctx, reqID, start, done := s.beginAudio(r, endpoint, model, clientKey, preview(input))
 	defer done()
+	indexPreview := logstore.RequestPreviewFromBody(body, logstore.DefaultRequestPreviewLen)
+	reqLog := requestLog(raw, body)
 	res := s.rt.ExecuteSpeech(ctx, model, sp)
 	if !res.Success {
 		writeJSON(w, res.Status, res.Body)
-		s.log(reqID, endpoint, clientKey, model, time.Since(start).Milliseconds(), raw, res, false)
+		s.log(reqID, endpoint, clientKey, model, indexPreview, time.Since(start).Milliseconds(), reqLog, res, false)
 		return
 	}
 	s.mu.RLock()
@@ -101,7 +103,7 @@ func (s *Server) handleSpeech(w http.ResponseWriter, r *http.Request) {
 
 	logged := *res
 	logged.Body = mustJSON(map[string]any{"audio": describe(len(audio), ct)})
-	s.log(reqID, endpoint, clientKey, model, time.Since(start).Milliseconds(), raw, &logged, false)
+	s.log(reqID, endpoint, clientKey, model, indexPreview, time.Since(start).Milliseconds(), reqLog, &logged, false)
 }
 
 // convertSpeech puts audio into the client's format. When ffmpeg is missing or
@@ -166,7 +168,7 @@ func (s *Server) handleTranscription(w http.ResponseWriter, r *http.Request) {
 	} else {
 		writeJSON(w, http.StatusOK, res.Body)
 	}
-	s.log(reqID, endpoint, clientKey, model, time.Since(start).Milliseconds(), reqLog, res, false)
+	s.log(reqID, endpoint, clientKey, model, "", time.Since(start).Milliseconds(), reqLog, res, false)
 }
 
 // readTranscription reads either request shape. A non-empty message is the

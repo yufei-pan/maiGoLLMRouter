@@ -176,6 +176,7 @@ func (s *Server) handle(op provider.Operation) http.HandlerFunc {
 		}
 
 		streamed := isStreamRequest(op, body)
+		orig := body // the request as sent: coercion returns a copy
 		s.mu.RLock()
 		coerce := s.cfg.Server.CoerceTrailingAssistant
 		s.mu.RUnlock()
@@ -193,6 +194,7 @@ func (s *Server) handle(op provider.Operation) http.HandlerFunc {
 		start := time.Now()
 		var live *inflight.Entry
 		reqID := "req-" + randomID()
+		reqPreview := logstore.RequestPreviewFromBody(orig, logstore.DefaultRequestPreviewLen)
 		if s.inflight != nil {
 			live = s.inflight.Register(inflight.Meta{
 				ID:             reqID,
@@ -200,8 +202,8 @@ func (s *Server) handle(op provider.Operation) http.HandlerFunc {
 				Endpoint:       endpoint,
 				InboundModel:   model,
 				ClientKey:      maskKey(clientKey),
-				RequestPreview: logstore.RequestContentPreview(raw, logstore.DefaultRequestPreviewLen),
-				InTokens:       logstore.EstimateInTokens(raw),
+				RequestPreview: reqPreview,
+				InTokens:       logstore.EstimateInTokensFromBody(orig),
 			})
 			defer s.inflight.Unregister(reqID)
 		}
@@ -223,7 +225,7 @@ func (s *Server) handle(op provider.Operation) http.HandlerFunc {
 			_, _ = w.Write(res.Body)
 		}
 
-		s.log(reqID, endpoint, clientKey, model, latency, raw, res, streamed)
+		s.log(reqID, endpoint, clientKey, model, reqPreview, latency, requestLog(raw, orig), res, streamed)
 	}
 }
 
@@ -246,26 +248,38 @@ func (s *Server) authorize(r *http.Request) (string, bool) {
 	return token, true
 }
 
-func (s *Server) log(id, endpoint, clientKey, model string, latency int64, reqBody []byte, res *router.Result, stream bool) {
+// requestLog is the request as the log keeps it: raw as sent, or, when body
+// holds audio clips, body's JSON with each clip described instead.
+func requestLog(raw []byte, body map[string]any) []byte {
+	if out, ok := logstore.ScrubAudioBody(body); ok {
+		return out
+	}
+	return raw
+}
+
+// log records one request: reqLog is the request exactly as logged, and
+// preview is its index row's preview.
+func (s *Server) log(id, endpoint, clientKey, model, preview string, latency int64, reqLog []byte, res *router.Result, stream bool) {
 	if s.logs == nil {
 		return
 	}
 	entry := logstore.Entry{
-		Time:         time.Now().UTC().Format(time.RFC3339Nano),
-		ID:           id,
-		ClientKey:    maskKey(clientKey),
-		Endpoint:     endpoint,
-		InboundModel: model,
-		Targets:      res.Targets,
-		Provider:     res.Provider,
-		Model:        res.Model,
-		Success:      res.Success,
-		Status:       res.Status,
-		LatencyMS:    latency,
-		Attempts:     res.Attempts,
-		Request:      json.RawMessage(logstore.ScrubAudio(reqBody)),
-		Response:     json.RawMessage(res.Body),
-		Stream:       stream,
+		Time:           time.Now().UTC().Format(time.RFC3339Nano),
+		ID:             id,
+		ClientKey:      maskKey(clientKey),
+		Endpoint:       endpoint,
+		InboundModel:   model,
+		Targets:        res.Targets,
+		Provider:       res.Provider,
+		Model:          res.Model,
+		Success:        res.Success,
+		Status:         res.Status,
+		LatencyMS:      latency,
+		Attempts:       res.Attempts,
+		Request:        json.RawMessage(reqLog),
+		Response:       json.RawMessage(res.Body),
+		Stream:         stream,
+		RequestPreview: &preview,
 	}
 	_ = s.logs.Write(entry)
 }
