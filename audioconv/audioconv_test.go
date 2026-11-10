@@ -239,12 +239,13 @@ func TestConvertBoundsConcurrentRuns(t *testing.T) {
 	withSlots(t, slots)
 	runs, ctl := t.TempDir(), t.TempDir() // a run file per live fake; the release file and the counts
 	release, logPath := ctl+"/release", ctl+"/counts"
-	// 1000 polls of 10 ms cap a fake at about 10 s, so a broken test can't hang.
+	// 6000 polls of 10 ms cap a fake at about 60 s, so a broken test can't hang;
+	// well past the test's own 10 s wait, so no fake gives up before its release.
 	script := fmt.Sprintf(`#!/bin/sh
 touch %[1]s/run.$$
 ls %[1]s | wc -l >> %[2]s
 i=0
-while [ ! -e %[3]s ] && [ $i -lt 1000 ]; do sleep 0.01; i=$((i+1)); done
+while [ ! -e %[3]s ] && [ $i -lt 6000 ]; do sleep 0.01; i=$((i+1)); done
 rm -f %[1]s/run.$$
 echo audio
 `, runs, logPath, release)
