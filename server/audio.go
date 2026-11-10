@@ -46,6 +46,11 @@ func (s *Server) handleSpeech(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "failed to read request body", "invalid_request_error")
 		return
 	}
+	release, ok := s.admit(w, r, int64(len(raw)))
+	if !ok {
+		return
+	}
+	defer release()
 	var body map[string]any
 	if json.Unmarshal(raw, &body) != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body", "invalid_request_error")
@@ -138,7 +143,17 @@ func (s *Server) handleTranscription(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	model, tr, msg := readTranscription(w, r)
+	raw, size, msg := readTranscriptionBody(w, r)
+	if msg != "" {
+		writeError(w, http.StatusBadRequest, msg, "invalid_request_error")
+		return
+	}
+	release, ok := s.admit(w, r, size)
+	if !ok {
+		return
+	}
+	defer release()
+	model, tr, msg := parseTranscription(r, raw)
 	if msg == tooManyValuesMessage { // its one refusal that carries a code
 		writeCodedError(w, http.StatusBadRequest, msg, "invalid_request_error", "too_many_values")
 		return
@@ -179,17 +194,43 @@ func (s *Server) handleTranscription(w http.ResponseWriter, r *http.Request) {
 	s.log(reqID, endpoint, clientKey, model, "", time.Since(start).Milliseconds(), reqLog, res, false)
 }
 
-// readTranscription reads either request shape. A non-empty message is the
-// reason the request is refused.
-func readTranscription(w http.ResponseWriter, r *http.Request) (string, provider.TranscriptionRequest, string) {
-	var tr provider.TranscriptionRequest
-	var model, temperature string
-	mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if mt == "multipart/form-data" {
-		r.Body = http.MaxBytesReader(w, r.Body, maxAudioRequest)
+// readTranscriptionBody reads either request shape in full: an upload into
+// r.MultipartForm, with raw nil, or JSON into raw. size is the bytes read. A
+// non-empty message is the reason the request is refused.
+func readTranscriptionBody(w http.ResponseWriter, r *http.Request) (raw []byte, size int64, msg string) {
+	if mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mt == "multipart/form-data" {
+		body := &countedBody{ReadCloser: http.MaxBytesReader(w, r.Body, maxAudioRequest)}
+		r.Body = body
 		if err := r.ParseMultipartForm(maxAudioRequest); err != nil {
-			return "", tr, "invalid multipart body"
+			return nil, 0, "invalid multipart body"
 		}
+		return nil, body.n, ""
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxAudioRequest))
+	if err != nil {
+		return nil, 0, "failed to read request body"
+	}
+	return raw, int64(len(raw)), ""
+}
+
+// countedBody counts the bytes read through it.
+type countedBody struct {
+	io.ReadCloser
+	n int64
+}
+
+func (c *countedBody) Read(p []byte) (int, error) {
+	n, err := c.ReadCloser.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
+// parseTranscription decodes what readTranscriptionBody read: r's parsed form
+// for an upload, else raw's JSON. A non-empty message is the reason the
+// request is refused.
+func parseTranscription(r *http.Request, raw []byte) (model string, tr provider.TranscriptionRequest, msg string) {
+	var temperature string
+	if r.MultipartForm != nil {
 		defer r.MultipartForm.RemoveAll()
 		f, h, err := r.FormFile("file")
 		if err != nil {
@@ -211,10 +252,6 @@ func readTranscription(w http.ResponseWriter, r *http.Request) (string, provider
 			}
 		}
 	} else {
-		raw, err := io.ReadAll(io.LimitReader(r.Body, maxAudioRequest))
-		if err != nil {
-			return "", tr, "failed to read request body"
-		}
 		// Counted before the struct decode below, which would build any
 		// "temperature" tree a second time.
 		var doc any
@@ -248,6 +285,7 @@ func readTranscription(w http.ResponseWriter, r *http.Request) (string, provider
 		} else {
 			mimeType, b64 = "", body.InputAudio.Data
 		}
+		var err error
 		if tr.Audio, err = base64.StdEncoding.DecodeString(b64); err != nil {
 			return "", tr, "input_audio.data is not base64"
 		}

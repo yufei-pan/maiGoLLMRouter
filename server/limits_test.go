@@ -1,15 +1,21 @@
 package server
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"maiGoLLMRouter/inflight"
 	"maiGoLLMRouter/logstore"
+	"maiGoLLMRouter/router"
 )
 
 // modelSenders post a request naming a model to each endpoint that takes one,
@@ -206,4 +212,152 @@ func TestValuesAtCapAccepted(t *testing.T) {
 			t.Errorf("%s: status %d, code %q, message %q", b.path, resp.StatusCode, code, msg)
 		}
 	}
+}
+
+// budgetServer runs the API against a fake OpenAI-kind provider that answers
+// chat, speech and transcription for model "m", and counts the requests
+// reaching it. It returns the Server, so a test can replace its budget before
+// the first request.
+func budgetServer(t *testing.T) (*Server, *httptest.Server, *atomic.Int64) {
+	t.Helper()
+	hits := new(atomic.Int64)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/audio/speech"):
+			w.Header().Set("Content-Type", "audio/mpeg")
+			fmt.Fprint(w, "ID3")
+		case strings.HasSuffix(r.URL.Path, "/audio/transcriptions"):
+			fmt.Fprint(w, `{"text":"hi"}`)
+		default:
+			fmt.Fprint(w, `{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}]}`)
+		}
+	}))
+	t.Cleanup(backend.Close)
+	cfg := loadCfg(t, `
+[server]
+client_keys = ["sk-test"]
+
+[[provider]]
+name = "p"
+keys = ["sk-upstream"]
+`+openAIBlock(backend.URL)+`
+
+[model."m"]
+targets = ["p/real"]
+`)
+	srv := New(cfg, router.New(cfg), nil, inflight.New())
+	mux := http.NewServeMux()
+	srv.Register(mux)
+	ts := httptest.NewServer(srv.WithCORS(mux))
+	t.Cleanup(ts.Close)
+	return srv, ts, hits
+}
+
+// budgetSenders post a small request to each body reader that admits through
+// the budget.
+var budgetSenders = []struct {
+	endpoint string
+	send     func(t *testing.T, ts *httptest.Server) *http.Response
+}{
+	{"chat", func(t *testing.T, ts *httptest.Server) *http.Response {
+		return post(t, ts, "/v1/chat/completions", `{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+	}},
+	{"speech", func(t *testing.T, ts *httptest.Server) *http.Response {
+		return post(t, ts, "/v1/audio/speech", `{"model":"m","input":"Hello"}`)
+	}},
+	{"transcription multipart", func(t *testing.T, ts *httptest.Server) *http.Response {
+		return postMultipart(t, ts, map[string]string{"model": "m"}, "speech.wav", "audio/wav", []byte("RIFFdata"))
+	}},
+	{"transcription JSON", func(t *testing.T, ts *httptest.Server) *http.Response {
+		return post(t, ts, "/v1/audio/transcriptions", `{"model":"m","input_audio":{"data":"UklGRg==","format":"wav"}}`)
+	}},
+}
+
+func TestBusyAfterWait(t *testing.T) {
+	srv, ts, hits := budgetServer(t)
+	srv.budget = newBudget(1024)
+	srv.budgetWait = 100 * time.Millisecond
+	release, _ := srv.budget.acquire(t.Context(), 1024, 0)
+	defer release()
+	for _, s := range budgetSenders {
+		start := time.Now()
+		resp := s.send(t, ts)
+		took := time.Since(start)
+		msg, typ, code := apiError(t, resp)
+		if resp.StatusCode != http.StatusServiceUnavailable || typ != "server_error" || code != "busy" ||
+			msg != "the router is busy with other large requests; retry shortly" || resp.Header.Get("Retry-After") != "5" {
+			t.Errorf("%s: status %d, type %q, code %q, message %q, Retry-After %q", s.endpoint, resp.StatusCode, typ, code, msg, resp.Header.Get("Retry-After"))
+		}
+		if took < 100*time.Millisecond {
+			t.Errorf("%s: answered after %v, before the 100 ms wait ran out", s.endpoint, took)
+		}
+	}
+	if n := hits.Load(); n != 0 {
+		t.Errorf("the provider got %d requests the budget never admitted", n)
+	}
+}
+
+func TestBudgetWaitThenServe(t *testing.T) {
+	srv, ts, _ := budgetServer(t)
+	srv.budget = newBudget(1024)
+	srv.budgetWait = 2 * time.Second
+	release, _ := srv.budget.acquire(t.Context(), 1024, 0)
+	start := time.Now()
+	time.AfterFunc(50*time.Millisecond, release)
+	resp := budgetSenders[0].send(t, ts)
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"content":"hi"`) {
+		t.Errorf("status %d, body %s", resp.StatusCode, body)
+	}
+	if took := time.Since(start); took < 50*time.Millisecond {
+		t.Errorf("answered after %v, before the budget had room", took)
+	}
+}
+
+func TestStalledUploadHoldsNoBudget(t *testing.T) {
+	srv, ts, _ := budgetServer(t)
+	srv.budget = newBudget(1024)
+	srv.budgetWait = 2 * time.Second // so a regression fails with 503 in 2 s, not 25
+	conn, err := net.Dial("tcp", ts.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	// Expect: 100-continue makes the server say when the handler first reads
+	// the body, so the second request goes only once the first is reading.
+	fmt.Fprint(conn, "POST /v1/chat/completions HTTP/1.1\r\nHost: router\r\nAuthorization: Bearer sk-test\r\n"+
+		"Content-Type: application/json\r\nContent-Length: 1000\r\nExpect: 100-continue\r\n\r\n")
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if line, err := bufio.NewReader(conn).ReadString('\n'); err != nil || !strings.HasPrefix(line, "HTTP/1.1 100 ") {
+		t.Fatalf("waiting for 100 Continue: %q, %v", line, err)
+	}
+	fmt.Fprint(conn, `{"model":"`) // 10 of the 1000 bytes, then nothing
+
+	head, tail := `{"model":"m","messages":[{"role":"user","content":"`, `"}]}`
+	body := head + strings.Repeat("x", 900-len(head)-len(tail)) + tail
+	start := time.Now()
+	resp := post(t, ts, "/v1/chat/completions", body)
+	took := time.Since(start)
+	if resp.StatusCode != http.StatusOK || took > time.Second {
+		t.Errorf("a 900-byte chat beside a stalled 1000-byte upload: status %d after %v, want 200 within 1 s", resp.StatusCode, took)
+	}
+}
+
+func TestBudgetReleasedAtRequestEnd(t *testing.T) {
+	srv, ts, _ := budgetServer(t)
+	srv.budget = newBudget(1024)
+	for _, s := range budgetSenders {
+		resp := s.send(t, ts)
+		_, _ = io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("%s: status %d", s.endpoint, resp.StatusCode)
+		}
+	}
+	ts.Close() // waits for every handler, so each has returned
+	release, ok := srv.budget.acquire(t.Context(), 1024, 0)
+	if !ok {
+		t.Fatalf("%d bytes still held after every request ended", held(srv.budget))
+	}
+	release()
 }

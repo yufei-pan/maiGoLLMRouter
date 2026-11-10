@@ -26,6 +26,8 @@ type Server struct {
 	logs       *logstore.Store
 	inflight   *inflight.Registry
 	clientKeys map[string]bool
+	budget     *budget       // admits each body to decoding
+	budgetWait time.Duration // how long a body waits for the budget before 503 busy
 }
 
 // New creates a Server.
@@ -34,7 +36,8 @@ func New(cfg *config.Config, rt *router.Router, logs *logstore.Store, active *in
 	for _, k := range cfg.Server.ClientKeys {
 		keys[k] = true
 	}
-	return &Server{cfg: cfg, rt: rt, logs: logs, inflight: active, clientKeys: keys}
+	return &Server{cfg: cfg, rt: rt, logs: logs, inflight: active, clientKeys: keys,
+		budget: newBudget(memoryBudget), budgetWait: budgetWait}
 }
 
 // Reload applies a new configuration to auth and routing. listen, log_dir, and
@@ -160,6 +163,11 @@ func (s *Server) handle(op provider.Operation) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "failed to read request body", "invalid_request_error")
 			return
 		}
+		release, ok := s.admit(w, r, int64(len(raw)))
+		if !ok {
+			return
+		}
+		defer release()
 		var body map[string]any
 		if err := json.Unmarshal(raw, &body); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid JSON body", "invalid_request_error")
