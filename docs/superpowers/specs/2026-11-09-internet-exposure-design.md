@@ -133,6 +133,11 @@ New refusals keep the existing shape from `writeError`, `{"error": {"message": �
     - Write the measured peak and the arithmetic beside the constant.
     - Ordinary requests should never wait: KB chat bodies, MB images and audio.
 - **Model names.** At most 256 bytes, with no control characters. The longest name in 2 months of logs is 57 bytes. Anything else gets a 400, `code` `invalid_model`, before routing, logging or the in-flight list. The message states the limit.
+- **JSON values.** A request body holding more than 100,000 JSON values gets a 400, `code` `too_many_values`, right after decoding and before routing, logging or the in-flight list. The message states the limit.
+  - **What a value is.** Each object, array, string, number, bool and null counts once, including the top-level value. Object keys don't count.
+  - **Why.** Dialect conversion builds Go maps for each message, so a 32 MiB body of tiny messages took 13.6 GiB on a Gemini target in the plan's Task 6 measurement. The memory budget can't stop a single request, because it always admits one body.
+  - **Why 100,000.** The largest of 154,614 real requests (October–November 2026) held 3,452 values (p99.9: 1,542), so the cap leaves about 29× headroom.
+  - **Exemption.** Multipart transcription has no JSON body and isn't counted.
 - **Gemini model path.** A model name containing a `..` path segment, `?`, `#` or `%` is not a valid Gemini target. That target fails as it would for an unknown model, and nothing is sent.
 - **Blackout map.** `Fail` also removes expired entries, so names that are never asked about again don't stay.
 
